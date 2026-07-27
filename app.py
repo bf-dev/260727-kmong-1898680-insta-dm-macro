@@ -46,6 +46,17 @@ class App:
         self._build_ui()
         self.updater_thread = updater.start_updater(
             stop_running_loop=self._stop_macro_silent, status_cb=self._log)
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        try:
+            if self.engine:
+                self.engine.stop()
+            if self.driver:
+                self.driver.quit()
+        except Exception:
+            pass
+        self.root.destroy()
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -179,6 +190,9 @@ class App:
 
     # ---------- 실행 ----------
     def on_start_click(self):
+        if self.engine is not None and self.engine.is_alive():
+            messagebox.showinfo("안내", "이미 실행 중입니다.")
+            return
         if self.driver is None or not self.logged_in:
             messagebox.showerror("오류", "먼저 계정 로그인을 완료해 주세요.")
             return
