@@ -1,0 +1,106 @@
+name: build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Import smoke
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -c "import config, chrome_provisioner, browser, excel_reader, progress_store, instagram_actions, diag_collector, bridge, single_instance, updater, macro_engine, app; print('imports ok')"
+
+      - name: Unit test excel_reader (C/F열만, 헤더/빈줄/F열없음 스킵)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python test_excel_reader.py -v
+
+      - name: Build exe (GUI, no console)
+        run: >
+          pyinstaller --onefile --noconsole
+          --name "인스타DM매크로"
+          --collect-all selenium
+          main.py
+
+      - name: Verify exe file type
+        shell: bash
+        run: file dist/*.exe
+
+      - name: GUI self-test + real screenshot on Windows desktop
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path screenshots | Out-Null
+          $exe = "dist\인스타DM매크로.exe"
+          $env:DIAG_HOLD_MS = "9000"
+          $p = Start-Process -FilePath $exe -ArgumentList "--guidemo" -PassThru
+          Start-Sleep -Seconds 8
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$PWD\screenshots\gui_1898680.png")
+          Start-Sleep -Seconds 4
+          if (-not (Test-Path "$PWD\screenshots\gui_1898680.png")) { throw "screenshot not created" }
+
+      - name: Validate screenshot is real (size + colour variety)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $img = [System.Drawing.Image]::FromFile("$PWD\screenshots\gui_1898680.png")
+          if ($img.Width -lt 400 -or $img.Height -lt 300) { throw "screenshot too small: $($img.Width)x$($img.Height)" }
+          $bmp = New-Object System.Drawing.Bitmap $img
+          $colours = @{}
+          for ($x = 0; $x -lt $bmp.Width; $x += 40) {
+            for ($y = 0; $y -lt $bmp.Height; $y += 40) {
+              $c = $bmp.GetPixel($x, $y).ToArgb()
+              $colours[$c] = $true
+            }
+          }
+          Write-Host "distinct sampled colours: $($colours.Count)  size: $($bmp.Width)x$($bmp.Height)"
+          if ($colours.Count -lt 8) { throw "screenshot looks blank ($($colours.Count) colours)" }
+
+      - name: Runtime self-test (DIAG_AUTO exit 0)
+        shell: pwsh
+        run: |
+          $env:DIAG_AUTO = "1"
+          $proc = Start-Process -FilePath "dist\인스타DM매크로.exe" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "self-test failed: $($proc.ExitCode)" }
+
+      - name: Upload screenshot artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-screenshot
+          path: screenshots/gui_1898680.png
+
+      - name: Upload exe artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: exe
+          path: dist/*.exe
+
+      - name: Publish release (versioned ASCII asset)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path config.py -Pattern 'APP_VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          Copy-Item "dist\인스타DM매크로.exe" "dist\insta-dm-macro-$ver.exe"
+          gh release upload latest "dist\insta-dm-macro-$ver.exe" "screenshots\gui_1898680.png" --clobber
+          if ($LASTEXITCODE -ne 0) { gh release create latest "dist\insta-dm-macro-$ver.exe" "screenshots\gui_1898680.png" --title latest --notes "auto build v$ver" }

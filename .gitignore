@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+.venv/
+out/
+screenshots/*.png
+!screenshots/.gitkeep
+
+metadata.json
+NOTES.md

@@ -1,0 +1,52 @@
+# -*- coding: utf-8 -*-
+"""인스타그램 팔로우+DM 매크로 - 고정 설정.
+
+고객(Kmong 1898680, order 7508852) 전용.
+엑셀 C열(인스타그램 URL) -> 팔로우 -> F열(개인화 DM) 발송 -> 다음 행.
+"""
+
+import os
+
+APP_NAME = "insta-dm-macro"
+APP_VERSION = "1.0.0"
+CUSTOMER_ID = "1898680"
+
+INSTAGRAM_BASE = "https://www.instagram.com"
+INSTAGRAM_LOGIN_URL = "https://www.instagram.com/accounts/login/"
+
+# 행 처리 사이 랜덤 대기(초). "빠르게 수십 명한테 연타"를 피하기 위한 최소/최대값.
+# 팔로우 직후 -> DM 사이의 짧은 대기와, 한 사람 처리 완료 후 다음 사람으로 넘어가기 전의
+# 긴 대기 두 군데에 쓰인다. 둘 다 매번 random.uniform 으로 다르게 뽑는다(고정 sleep 금지).
+DELAY_AFTER_FOLLOW_MIN = 4
+DELAY_AFTER_FOLLOW_MAX = 11
+DELAY_BETWEEN_PEOPLE_MIN = 35
+DELAY_BETWEEN_PEOPLE_MAX = 95
+
+# 사람처럼 보이게: 메시지 입력 시 한 글자씩, 글자 사이 랜덤 지터(초)
+TYPE_JITTER_MIN = 0.03
+TYPE_JITTER_MAX = 0.16
+
+# 페이지 이동/버튼 대기 타임아웃(초)
+WAIT_TIMEOUT = 15
+
+# 원격 진단(Artifacts API) - 고객에게 노출하지 않음
+WORKS_API = "https://works.insu.ng/works/api"
+STATIC_BASE = f"https://works.insu.ng/works/public/{CUSTOMER_ID}"
+
+# 자동 업데이트
+VERSION_URL = f"{STATIC_BASE}/version-{APP_NAME}.json"
+UPDATE_CHECK_SECONDS = 300
+
+# 프로그램 전용 크롬(Chrome for Testing) / 계정별 프로필 / 설정·진행상황 저장 위치
+_HOME = os.path.expanduser("~")
+CHROME_CACHE_DIR = os.path.join(_HOME, ".insta_dm_macro", "chrome")
+CHROME_PROFILE_ROOT = os.path.join(_HOME, ".insta_dm_macro", "profiles")
+APP_DIR = os.path.join(os.getenv("APPDATA", _HOME), "InstaDmMacro")
+SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
+PROGRESS_DIR = os.path.join(APP_DIR, "progress")
+
+
+def profile_dir_for(account_label):
+    """계정 라벨(사용자가 지은 별명)별 크롬 프로필 디렉터리. 계정마다 로그인 세션 분리."""
+    safe = "".join(c for c in (account_label or "default") if c.isalnum() or c in "._-")
+    return os.path.join(CHROME_PROFILE_ROOT, safe or "default")
