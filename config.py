@@ -26,6 +26,23 @@ DELAY_BETWEEN_PEOPLE_MAX = 95
 TYPE_JITTER_MIN = 0.03
 TYPE_JITTER_MAX = 0.16
 
+# 프로필 페이지를 열고 곧바로 팔로우를 누르지 않고 '훑어보는' 랜덤 대기(초)
+PROFILE_VIEW_PAUSE_MIN = 1.5
+PROFILE_VIEW_PAUSE_MAX = 4.0
+# DM 스레드 페이지가 뜬 뒤 입력창을 찾기 전 랜덤 대기(초)
+DM_PAGE_LOAD_PAUSE_MIN = 1.5
+DM_PAGE_LOAD_PAUSE_MAX = 3.0
+# 입력창 클릭 후 타이핑 시작 전 / 타이핑 후 전송 전 랜덤 대기(초)
+PRE_TYPE_PAUSE_MIN = 0.4
+PRE_TYPE_PAUSE_MAX = 1.0
+POST_TYPE_PAUSE_MIN = 0.4
+POST_TYPE_PAUSE_MAX = 1.2
+# 팔로우 클릭 직후 / DM 전송 직후 짧은 랜덤 대기(초)
+POST_FOLLOW_CLICK_PAUSE_MIN = 1.0
+POST_FOLLOW_CLICK_PAUSE_MAX = 2.5
+POST_SEND_PAUSE_MIN = 1.0
+POST_SEND_PAUSE_MAX = 2.0
+
 # 페이지 이동/버튼 대기 타임아웃(초)
 WAIT_TIMEOUT = 15
 

@@ -29,6 +29,11 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python test_excel_reader.py -v
 
+      - name: Unit test macro flow (follow->DM order, resume/no-duplicate-DM, batch-tolerant errors)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python test_macro_flow.py -v
+
       - name: Build exe (GUI, no console)
         run: >
           pyinstaller --onefile --noconsole

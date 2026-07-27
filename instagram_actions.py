@@ -156,7 +156,7 @@ def follow_profile(driver, profile_url, log=print):
     if "sorry, this page" in page_text or "페이지를 사용할 수 없" in page_text:
         return ActionResult(False, "profile_not_found")
 
-    _human_pause(1.5, 4.0)  # 사람처럼 페이지를 잠깐 훑어보는 대기
+    _human_pause(config.PROFILE_VIEW_PAUSE_MIN, config.PROFILE_VIEW_PAUSE_MAX)  # 훑어보는 대기
 
     buttons = _find_buttonish(driver)
     already_following = False
@@ -171,7 +171,8 @@ def follow_profile(driver, profile_url, log=print):
             try:
                 el.click()
                 log(f"팔로우 클릭: {profile_url}")
-                time.sleep(random.uniform(1.0, 2.5))
+                time.sleep(random.uniform(config.POST_FOLLOW_CLICK_PAUSE_MIN,
+                                          config.POST_FOLLOW_CLICK_PAUSE_MAX))
                 return ActionResult(True, "followed")
             except Exception as e:
                 return ActionResult(False, f"follow_click_failed: {e}")
@@ -224,7 +225,7 @@ def send_dm(driver, username, message, log=print):
             lambda d: d.execute_script("return document.readyState") == "complete")
     except Exception:
         pass
-    time.sleep(random.uniform(1.5, 3.0))
+    time.sleep(random.uniform(config.DM_PAGE_LOAD_PAUSE_MIN, config.DM_PAGE_LOAD_PAUSE_MAX))
 
     page_text = ""
     try:
@@ -246,11 +247,11 @@ def send_dm(driver, username, message, log=print):
 
     try:
         box.click()
-        time.sleep(random.uniform(0.4, 1.0))
+        time.sleep(random.uniform(config.PRE_TYPE_PAUSE_MIN, config.PRE_TYPE_PAUSE_MAX))
         _type_like_human(box, message)
-        time.sleep(random.uniform(0.4, 1.2))
+        time.sleep(random.uniform(config.POST_TYPE_PAUSE_MIN, config.POST_TYPE_PAUSE_MAX))
         box.send_keys(Keys.RETURN)
-        time.sleep(random.uniform(1.0, 2.0))
+        time.sleep(random.uniform(config.POST_SEND_PAUSE_MIN, config.POST_SEND_PAUSE_MAX))
         log(f"DM 발송 완료: @{username}")
         return ActionResult(True, "sent")
     except Exception as e:
