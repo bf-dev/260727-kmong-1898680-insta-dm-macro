@@ -121,15 +121,21 @@ def login(account_label, username, password, verification_code=None, proxy=None,
     _, exc = _load_instagrapi()
     cl = _new_client(proxy)
 
-    # 같은 계정으로 재로그인할 때는 이전 기기 정보를 재사용한다(매번 새 기기로 붙으면
-    # 인스타가 의심 로그인으로 보고 챌린지를 띄운다 - instagrapi best-practices).
+    # 같은 계정으로 재시도할 때는 이전 기기 정보(uuid/기기모델/앱버전)를 그대로 재사용한다.
+    # Client() 는 새로 만들 때마다 가상의 새 기기를 무작위 생성하는데, 로그인을 시도할 때마다
+    # 다른 "기기"가 접속하는 모양이 되면 비밀번호가 맞아도 인스타가 계정 탈취 시도로 보고
+    # 거부한다(BadPassword: "...even if the password is correct" - instagrapi best-practices).
+    # 그래서 첫 시도가 실패하더라도 그 시점에 생성된 기기 지문을 즉시 저장해, 다음 재시도부터는
+    # 계속 같은 기기로 보이게 한다(로그인 성공 후에만 저장하면 실패한 시도마다 기기가 계속
+    # 바뀌어 이 보호 자체가 무의미해진다).
     path = session_file_for(account_label)
     if os.path.exists(path):
         try:
             cl.load_settings(path)
-            cl.set_uuids(cl.get_settings().get("uuids", {}))
         except Exception:
             pass
+    else:
+        _save(cl, account_label)
 
     def _challenge_code_handler(_username, choice):
         raise LoginNeedsCode("challenge", f"인스타그램이 {choice} 로 보낸 확인 코드가 필요합니다.")
@@ -141,10 +147,11 @@ def login(account_label, username, password, verification_code=None, proxy=None,
     except exc.TwoFactorRequired:
         raise LoginNeedsCode("2fa", "2단계 인증 코드가 필요합니다. 인증 앱/문자의 6자리 코드를 입력해 주세요.")
     except exc.BadPassword as e:
-        # instagrapi 문서 주의: 비밀번호가 맞아도 인스타가 IP/기기를 불신하면 이 응답이 온다.
+        # 기기 지문은 위에서 이미 고정했으므로(재시도해도 같은 "기기"), 그런데도 계속
+        # 거부된다면 기기/IP 불신보다는 아이디/비밀번호 자체가 틀렸을 가능성이 크다.
         raise RuntimeError(
             "인스타그램이 로그인을 거부했습니다. 아이디/비밀번호를 다시 확인해 주세요. "
-            f"(같은 계정으로 다른 기기에서 로그인한 직후에도 잠시 이 응답이 옵니다) 원문: {e}")
+            f"(이 계정의 기기 지문은 재시도마다 고정되어 있어 단순 기기 불신 가능성은 낮습니다) 원문: {e}")
     except exc.ChallengeRequired:
         raise LoginNeedsCode("challenge", "인스타그램 본인 확인이 필요합니다. 이메일/문자로 온 코드를 입력해 주세요.")
 

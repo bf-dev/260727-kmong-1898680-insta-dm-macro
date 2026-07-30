@@ -8,6 +8,7 @@
 를 확인한다. 3번이 특히 중요하다 - 여기서 삼켜버리면 일시적 오류로 사람을 통째로 건너뛴다.
 """
 
+import json
 import os
 import tempfile
 import unittest
@@ -183,6 +184,80 @@ class SessionFileTests(unittest.TestCase):
 
     def test_missing_session_returns_none(self):
         self.assertIsNone(ig_api.load_session("never_logged_in", log=lambda *_: None))
+
+
+class FakeLoginClient:
+    """login() 이 실제로 부르는 최소 표면만 흉내낸다(기기 지문 고정 검증용)."""
+
+    login_error = None
+    instances = []
+
+    def __init__(self):
+        self.settings = {"uuids": {"uuid": f"device-{len(FakeLoginClient.instances)}"}}
+        self.delay_range = None
+        self.challenge_code_handler = None
+        FakeLoginClient.instances.append(self)
+
+    def set_locale(self, *_a, **_k):
+        pass
+
+    def set_country(self, *_a, **_k):
+        pass
+
+    def set_country_code(self, *_a, **_k):
+        pass
+
+    def set_timezone_offset(self, *_a, **_k):
+        pass
+
+    def set_proxy(self, *_a, **_k):
+        pass
+
+    def dump_settings(self, path):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.settings, f)
+
+    def load_settings(self, path):
+        with open(path, encoding="utf-8") as f:
+            self.settings = json.load(f)
+
+    def login(self, username, password, verification_code=""):
+        raise type(self).login_error
+
+
+@unittest.skipIf(ig_exc is None, "instagrapi 미설치")
+class LoginDeviceFingerprintPinningTests(unittest.TestCase):
+    """실패한 로그인 시도도 기기 지문을 저장하는지 - 안 그러면 재시도마다 다른 '기기'가
+    되어 instagrapi 의 BadPassword("...even if the password is correct") 를 스스로 유발한다."""
+
+    def setUp(self):
+        self._orig_loader = ig_api._load_instagrapi
+        FakeLoginClient.instances = []
+        FakeLoginClient.login_error = ig_exc.BadPassword("nope")
+        ig_api._load_instagrapi = lambda: (FakeLoginClient, ig_exc)
+        self.label = "device_pin_test"
+        self.path = ig_api.session_file_for(self.label)
+        if os.path.exists(self.path):
+            os.remove(self.path)
+
+    def tearDown(self):
+        ig_api._load_instagrapi = self._orig_loader
+        if os.path.exists(self.path):
+            os.remove(self.path)
+
+    def test_fingerprint_persists_across_failed_attempts(self):
+        with self.assertRaises(RuntimeError):
+            ig_api.login(self.label, "user", "wrongpass", log=lambda *_: None)
+        self.assertTrue(os.path.exists(self.path),
+                        "실패한 첫 시도도 기기 지문을 저장해야 다음 재시도가 같은 기기로 보인다")
+        first_uuid = json.load(open(self.path, encoding="utf-8"))["uuids"]["uuid"]
+
+        with self.assertRaises(RuntimeError):
+            ig_api.login(self.label, "user", "wrongpass", log=lambda *_: None)
+        second_uuid = json.load(open(self.path, encoding="utf-8"))["uuids"]["uuid"]
+
+        self.assertEqual(first_uuid, second_uuid,
+                          "재시도마다 다른 기기로 보이면 이 보호 장치가 무의미해진다")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@
 import os
 
 APP_NAME = "insta-dm-macro"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 CUSTOMER_ID = "1898680"
 
 INSTAGRAM_BASE = "https://www.instagram.com"
@@ -46,10 +46,12 @@ POST_SEND_PAUSE_MAX = 2.0
 # 페이지 이동/버튼 대기 타임아웃(초)
 WAIT_TIMEOUT = 15
 
-# ---- 엔진 선택(v1.1) ----
-# "api"   = instagrapi(비공개 모바일 API). 기본값. 셀렉터가 없어 인스타 화면 변경에 안 깨진다.
-# "browser" = 크롬 웹 UI 조작(v1.0 방식). 아이디/비번을 프로그램에 주기 싫을 때의 대안.
-DEFAULT_ENGINE = "api"
+# ---- 엔진 선택(v1.1, 기본값은 v1.2 에서 browser 로 되돌림) ----
+# "api"   = instagrapi(비공개 모바일 API). 실계정 라이브 로그인이 반복 거부됨(2026-07-30) -
+#           더 이상 기본값 아님. 계정/비밀번호를 프로그램에 맡기고 싶은 경우의 대안으로만 남김.
+# "browser" = 크롬 웹 UI 조작(v1.0 방식). 아이디/비번을 프로그램이 저장/입력하지 않고 사람이
+#             직접 로그인 - 기본값. 오늘 실계정으로 로그인/팔로우 라이브 검증 완료.
+DEFAULT_ENGINE = "browser"
 # instagrapi 요청 사이 랜덤 지연 범위(초) - Client.delay_range 로 들어간다.
 API_DELAY_MIN = 2
 API_DELAY_MAX = 6
