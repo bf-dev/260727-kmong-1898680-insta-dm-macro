@@ -27,11 +27,62 @@ FOLLOW_TEXTS = {"follow", "팔로우"}
 FOLLOWING_TEXTS = {"following", "팔로잉", "requested", "요청됨"}
 UNFOLLOW_HINT_TEXTS = {"message", "메시지", "메시지 보내기"}  # 이미 팔로우 중일 때 옆에 뜨는 버튼
 
+# 셀렉터를 못 찾았다는 뜻의 detail 값들(= 인스타 DOM 변경 의심 신호). macro_engine 이 이걸 보고
+# 일반 실패와 구분해 'selector-miss' 진단을 따로 올린다.
+SELECTOR_MISS_DETAILS = {"follow_button_not_found", "message_box_not_found"}
+
+# 계정 제한/차단 화면의 문구(소문자 비교). 인스타는 이런 화면을 띄운 뒤에도 클릭 자체는
+# 계속 받아주기 때문에, 감지하지 않으면 매크로가 차단된 계정으로 계속 두드리게 된다.
+BLOCK_TEXT_PATTERNS = (
+    "action blocked", "작업이 차단",
+    "temporarily blocked", "일시적으로 차단", "일시적으로 제한",
+    "try again later", "나중에 다시 시도", "잠시 후 다시 시도",
+    "we restrict certain activity", "특정 활동을 제한", "활동이 제한",
+    "we limit how often", "너무 자주",
+    "your account has been suspended", "계정이 정지",
+    "confirm it's you", "confirm its you", "본인 확인",
+    "suspicious login", "의심스러운 로그인",
+)
+# URL 만 봐도 확실한 것들(챌린지/정지/로그인 튕김).
+BLOCK_URL_MARKERS = (
+    ("/challenge", "challenge"),
+    ("/accounts/suspended", "account_suspended"),
+    ("/accounts/disabled", "account_disabled"),
+    ("/accounts/login", "logged_out"),
+)
+
 
 class ActionResult:
     def __init__(self, ok, detail=""):
         self.ok = ok
         self.detail = detail
+
+
+def detect_restriction(driver):
+    """지금 화면이 인스타의 제한/차단/본인확인/로그아웃 화면인지 검사해 사유를 반환(아니면 None).
+
+    페이지 이동을 하지 않는다(현재 상태만 본다) - 매 행마다 불리므로 부작용이 없어야 한다.
+    """
+    try:
+        url = (driver.current_url or "").lower()
+    except Exception:
+        url = ""
+    for marker, reason in BLOCK_URL_MARKERS:
+        if marker in url:
+            return reason
+
+    try:
+        body_text = (driver.find_element(By.TAG_NAME, "body").text or "").lower()
+    except Exception:
+        return None
+    # 페이지 전체 텍스트에서 찾으면 오탐이 늘어난다. 차단 안내는 항상 짧은 모달/전면 화면이라
+    # 본문이 길면(= 평범한 프로필/DM 화면) 차단 화면이 아니라고 본다.
+    if len(body_text) > 4000:
+        return None
+    for pattern in BLOCK_TEXT_PATTERNS:
+        if pattern in body_text:
+            return f"action_block:{pattern}"
+    return None
 
 
 def _human_pause(min_s, max_s):
@@ -47,13 +98,19 @@ def is_logged_in(driver):
     except Exception:
         pass
     time.sleep(1.5)
+    # 2026-07-30 실측: 인스타 로그인 폼의 input 은 더 이상 name="username"/"password" 가 아니다
+    # (현재는 name="email"/"pass", 변형에 따라 name 자체가 없기도 하다). 이름에 의존하면
+    # '로그인 폼이 떠 있는데 로그인된 걸로 오판'해서 매크로가 전 행을 실패시킨다.
+    # 그래서 이름 대신 (1) 로그인 URL 로 튕겼는지 (2) 화면에 비밀번호 입력칸이 보이는지로 본다.
     try:
-        login_fields = driver.find_elements(By.NAME, "username")
-        password_fields = driver.find_elements(By.NAME, "password")
-        if login_fields and password_fields:
-            for f in login_fields:
-                if f.is_displayed():
-                    return False
+        if "/accounts/login" in (driver.current_url or "").lower():
+            return False
+    except Exception:
+        pass
+    try:
+        for f in driver.find_elements(By.CSS_SELECTOR, "input[type='password']"):
+            if f.is_displayed():
+                return False
         return True
     except Exception:
         return False

@@ -1,3 +1,4 @@
+instagrapi>=2.18
 selenium>=4.20
 requests>=2.31
 openpyxl>=3.1

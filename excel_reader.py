@@ -40,6 +40,10 @@ def _extract_username(url):
     return username
 
 
+# 다른 모듈(ig_api)에서도 C열 URL -> 사용자명 변환이 필요해서 공개 이름을 하나 둔다.
+extract_username = _extract_username
+
+
 def load_rows(path):
     """엑셀에서 (C=URL, F=메시지) 데이터 행만 뽑아 Row 리스트로 반환.
 

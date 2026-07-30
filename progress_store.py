@@ -70,3 +70,63 @@ def reset(excel_path, account_label):
             os.remove(p)
     except Exception:
         pass
+
+
+# ---------------- 하루 처리량 카운터 (v1.1) ----------------
+# 엑셀 파일이 아니라 '인스타 계정' 기준으로 센다. 같은 계정으로 엑셀을 바꿔 돌려도 하루
+# 총량은 합산돼야 계정 보호가 된다. 날짜는 사용자 로컬 날짜(고객이 체감하는 '오늘').
+
+_KEEP_DAYS = 14
+
+
+def _daily_path(account_label):
+    os.makedirs(config.PROGRESS_DIR, exist_ok=True)
+    key = hashlib.sha1((account_label or "default").encode("utf-8")).hexdigest()[:16]
+    return os.path.join(config.PROGRESS_DIR, f"daily_{key}.json")
+
+
+def today_str():
+    return time.strftime("%Y-%m-%d")
+
+
+def _load_daily(account_label):
+    try:
+        with open(_daily_path(account_label), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        counts = data.get("counts", {})
+        return {str(k): int(v) for k, v in counts.items()}
+    except Exception:
+        return {}
+
+
+def get_daily_count(account_label, day=None):
+    """해당 계정이 그 날짜에 처리한 인원 수."""
+    return _load_daily(account_label).get(day or today_str(), 0)
+
+
+def bump_daily_count(account_label, n=1):
+    """오늘 카운트를 n 만큼 올리고 올린 뒤 값을 반환. 저장 실패해도 앱을 막지 않는다."""
+    day = today_str()
+    counts = _load_daily(account_label)
+    new_value = counts.get(day, 0) + n
+    counts[day] = new_value
+    # 오래된 날짜는 정리(파일이 무한정 커지지 않게)
+    if len(counts) > _KEEP_DAYS:
+        for old in sorted(counts)[:-_KEEP_DAYS]:
+            counts.pop(old, None)
+    try:
+        with open(_daily_path(account_label), "w", encoding="utf-8") as f:
+            json.dump({"account_label": account_label, "counts": counts,
+                       "updated_at": time.time()}, f, ensure_ascii=False)
+    except Exception:
+        pass
+    return new_value
+
+
+def reset_daily_count(account_label):
+    try:
+        p = _daily_path(account_label)
+        if os.path.exists(p):
+            os.remove(p)
+    except Exception:
+        pass

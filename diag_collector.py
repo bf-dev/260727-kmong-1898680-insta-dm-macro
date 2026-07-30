@@ -29,8 +29,33 @@ def _redacted_cookies(driver):
     return out
 
 
+def _api_meta(session):
+    """api 엔진(ig_api.ApiSession)에는 페이지가 없다. 대신 진단에 쓸 수 있는 상태만 담는다."""
+    return {
+        "engine": "api",
+        "account_label": getattr(session, "account_label", ""),
+        "restriction": getattr(session, "restriction", None),
+    }
+
+
 def capture_zip(driver, label, extra_text=""):
-    """현재 페이지 상태를 zip 파일로 만들어 임시경로에 저장하고 그 경로를 반환."""
+    """현재 페이지 상태를 zip 파일로 만들어 임시경로에 저장하고 그 경로를 반환.
+
+    `driver` 가 selenium 드라이버가 아니라 api 엔진 세션이면 페이지 덤프 대신 세션 상태만 담는다.
+    """
+    if not hasattr(driver, "page_source"):
+        fd, path = tempfile.mkstemp(suffix=".zip")
+        os.close(fd)
+        try:
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+                meta = _api_meta(driver)
+                meta.update({"label": label, "note": extra_text[:2000],
+                             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+                z.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+            return path
+        except Exception:
+            return None
+
     try:
         html = driver.page_source
     except Exception:

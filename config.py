@@ -8,7 +8,7 @@
 import os
 
 APP_NAME = "insta-dm-macro"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 CUSTOMER_ID = "1898680"
 
 INSTAGRAM_BASE = "https://www.instagram.com"
@@ -45,6 +45,29 @@ POST_SEND_PAUSE_MAX = 2.0
 
 # 페이지 이동/버튼 대기 타임아웃(초)
 WAIT_TIMEOUT = 15
+
+# ---- 엔진 선택(v1.1) ----
+# "api"   = instagrapi(비공개 모바일 API). 기본값. 셀렉터가 없어 인스타 화면 변경에 안 깨진다.
+# "browser" = 크롬 웹 UI 조작(v1.0 방식). 아이디/비번을 프로그램에 주기 싫을 때의 대안.
+DEFAULT_ENGINE = "api"
+# instagrapi 요청 사이 랜덤 지연 범위(초) - Client.delay_range 로 들어간다.
+API_DELAY_MIN = 2
+API_DELAY_MAX = 6
+# 계정당 고정 IP 를 쓰고 싶을 때만 채운다(instagrapi 권장). 비워두면 PC 의 인터넷을 그대로 쓴다.
+# 예: "socks5h://아이디:비밀번호@호스트:1080"
+API_PROXY = os.getenv("INSTA_DM_PROXY", "")
+
+# ---- 계정 보호(v1.1) ----
+# 하루에 한 계정으로 처리할 최대 인원(팔로우+DM 한 세트 = 1명). 랜덤 대기는 '연타'만 막을 뿐
+# 하루 총량은 못 막는다. 인스타 차단은 총량에서 훨씬 크게 걸리므로 상한에 닿으면 스스로 멈춘다.
+# GUI 에서 바꿀 수 있고 settings.json 에 저장된다. 카운트는 계정 별명별/날짜별로 따로 센다.
+DEFAULT_DAILY_CAP = 40
+DAILY_CAP_MIN = 1
+DAILY_CAP_MAX = 300
+# 연속 실패가 이만큼 쌓이면 계정 제한/DOM 변경을 의심하고 배치를 중단한다(계속 두드리면 더 위험).
+CONSECUTIVE_FAILURE_HALT = 3
+# 셀렉터(팔로우 버튼/DM 입력창)를 연속으로 못 찾은 횟수 - 인스타 DOM 변경 신호. 중단 + 진단 업로드.
+SELECTOR_MISS_HALT_STREAK = 3
 
 # 원격 진단(Artifacts API) - 고객에게 노출하지 않음
 WORKS_API = "https://works.insu.ng/works/api"

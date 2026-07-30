@@ -22,23 +22,30 @@ jobs:
       - name: Import smoke
         env:
           PYTHONIOENCODING: utf-8
-        run: python -c "import config, chrome_provisioner, browser, excel_reader, progress_store, instagram_actions, diag_collector, bridge, single_instance, updater, macro_engine, app; print('imports ok')"
+        run: python -c "import config, settings, chrome_provisioner, browser, excel_reader, progress_store, instagram_actions, ig_api, diag_collector, bridge, single_instance, updater, macro_engine, app; print('imports ok')"
 
       - name: Unit test excel_reader (C/F열만, 헤더/빈줄/F열없음 스킵)
         env:
           PYTHONIOENCODING: utf-8
         run: python test_excel_reader.py -v
 
-      - name: Unit test macro flow (follow->DM order, resume/no-duplicate-DM, batch-tolerant errors)
+      - name: Unit test macro flow (follow->DM order, resume, daily cap, halt-on-block, selector-miss)
         env:
           PYTHONIOENCODING: utf-8
         run: python test_macro_flow.py -v
+
+      - name: Unit test instagrapi engine (follow/DM, restriction mapping, retry-on-network-error)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python test_ig_api.py -v
 
       - name: Build exe (GUI, no console)
         run: >
           pyinstaller --onefile --noconsole
           --name "인스타DM매크로"
           --collect-all selenium
+          --collect-all instagrapi
+          --collect-all pydantic
           main.py
 
       - name: Verify exe file type

@@ -22,6 +22,7 @@ import bridge
 import config
 import excel_reader
 import progress_store
+import settings
 import single_instance
 import updater
 
@@ -32,16 +33,22 @@ class App:
         root.title(f"인스타 DM 매크로 v{config.APP_VERSION} (고객 {config.CUSTOMER_ID})")
         root.geometry("860x620")
 
-        self.driver = None
+        self.driver = None          # browser 엔진일 때만 사용(selenium 드라이버)
+        self.session = None         # 실행에 넘기는 세션(api=ApiSession, browser=드라이버)
+        self.actions = None         # ig_api 또는 instagram_actions
         self.engine = None
         self.rows = []
         self.skipped_no_message = []
         self.logged_in = False
 
         self.account_var = tk.StringVar(value="default")
+        self.engine_var = tk.StringVar(value=config.DEFAULT_ENGINE)
+        self.username_var = tk.StringVar(value="")
+        self.password_var = tk.StringVar(value="")
         self.excel_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="상태: 로그인 필요")
         self.stats_var = tk.StringVar(value="완료 0 / 팔로우 0 / DM 0 / 실패 0")
+        self.cap_var = tk.StringVar(value=str(settings.get_daily_cap()))
 
         self._build_ui()
         self.updater_thread = updater.start_updater(
@@ -65,10 +72,25 @@ class App:
         acc_frame = ttk.LabelFrame(self.root, text="1) 인스타그램 계정")
         acc_frame.pack(fill="x", **pad)
         ttk.Label(acc_frame, text="계정 별명(여러 계정 구분용):").grid(row=0, column=0, padx=6, pady=6, sticky="w")
-        ttk.Entry(acc_frame, textvariable=self.account_var, width=24).grid(row=0, column=1, padx=6, pady=6)
-        ttk.Button(acc_frame, text="로그인 / 계정 전환", command=self.on_login_click).grid(row=0, column=2, padx=6)
-        ttk.Button(acc_frame, text="로그아웃", command=self.on_logout_click).grid(row=0, column=3, padx=6)
-        ttk.Label(acc_frame, textvariable=self.status_var).grid(row=1, column=0, columnspan=4, padx=6, sticky="w")
+        ttk.Entry(acc_frame, textvariable=self.account_var, width=20).grid(row=0, column=1, padx=6, pady=6)
+        ttk.Radiobutton(acc_frame, text="빠른 방식(아이디/비번)", variable=self.engine_var,
+                        value="api", command=self._on_engine_change).grid(row=0, column=2, padx=6)
+        ttk.Radiobutton(acc_frame, text="크롬 창에서 직접 로그인", variable=self.engine_var,
+                        value="browser", command=self._on_engine_change).grid(row=0, column=3, padx=6)
+
+        self.cred_frame = ttk.Frame(acc_frame)
+        self.cred_frame.grid(row=1, column=0, columnspan=4, sticky="w")
+        ttk.Label(self.cred_frame, text="아이디:").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+        ttk.Entry(self.cred_frame, textvariable=self.username_var, width=22).grid(row=0, column=1, padx=6)
+        ttk.Label(self.cred_frame, text="비밀번호:").grid(row=0, column=2, padx=6, sticky="w")
+        ttk.Entry(self.cred_frame, textvariable=self.password_var, width=22, show="*").grid(row=0, column=3, padx=6)
+        ttk.Label(self.cred_frame, text="(비밀번호는 저장하지 않습니다. 최초 1회만 입력)").grid(
+            row=1, column=0, columnspan=4, padx=6, sticky="w")
+
+        ttk.Button(acc_frame, text="로그인 / 계정 전환", command=self.on_login_click).grid(row=2, column=2, padx=6, pady=6)
+        ttk.Button(acc_frame, text="로그아웃", command=self.on_logout_click).grid(row=2, column=3, padx=6)
+        ttk.Label(acc_frame, textvariable=self.status_var).grid(row=3, column=0, columnspan=4, padx=6, sticky="w")
+        self._on_engine_change()
 
         file_frame = ttk.LabelFrame(self.root, text="2) 엑셀 파일 (C열=인스타 URL, F열=DM 문구)")
         file_frame.pack(fill="x", **pad)
@@ -82,6 +104,12 @@ class App:
         ttk.Button(ctrl_frame, text="중지", command=self.on_stop_click).grid(row=0, column=1, padx=6)
         ttk.Button(ctrl_frame, text="진행상황 초기화", command=self.on_reset_click).grid(row=0, column=2, padx=6)
         ttk.Label(ctrl_frame, textvariable=self.stats_var).grid(row=0, column=3, padx=16)
+        ttk.Label(ctrl_frame, text="하루 최대 처리 인원:").grid(row=1, column=0, padx=6, pady=6, sticky="w")
+        ttk.Spinbox(ctrl_frame, from_=config.DAILY_CAP_MIN, to=config.DAILY_CAP_MAX, width=6,
+                    textvariable=self.cap_var, command=self._on_cap_change).grid(row=1, column=1, padx=6, sticky="w")
+        ttk.Label(ctrl_frame,
+                  text="계정 보호용 상한입니다. 이 인원까지 처리하면 그날은 자동으로 멈춥니다."
+                  ).grid(row=1, column=2, columnspan=2, padx=6, sticky="w")
 
         log_frame = ttk.LabelFrame(self.root, text="로그")
         log_frame.pack(fill="both", expand=True, **pad)
@@ -105,10 +133,79 @@ class App:
         except Exception:
             pass
 
+    def _on_engine_change(self):
+        """아이디/비번 입력칸은 빠른 방식(api)일 때만 보인다."""
+        try:
+            if self.engine_var.get() == "api":
+                self.cred_frame.grid()
+            else:
+                self.cred_frame.grid_remove()
+        except Exception:
+            pass
+
+    def _on_cap_change(self):
+        try:
+            self.cap_var.set(str(settings.set_daily_cap(self.cap_var.get())))
+        except Exception:
+            pass
+
     # ---------- 계정 ----------
     def on_login_click(self):
         label = self.account_var.get().strip() or "default"
-        threading.Thread(target=self._login_flow, args=(label,), daemon=True).start()
+        if self.engine_var.get() == "api":
+            threading.Thread(target=self._api_login_flow, args=(label,), daemon=True).start()
+        else:
+            threading.Thread(target=self._login_flow, args=(label,), daemon=True).start()
+
+    def _api_login_flow(self, label, verification_code=None):
+        """instagrapi 로그인. 저장된 세션이 있으면 비밀번호 없이 붙는다."""
+        import ig_api
+        self._set_status("상태: 접속 중...")
+        try:
+            session = ig_api.load_session(label, proxy=config.API_PROXY, log=self._log)
+            if session is None:
+                username = self.username_var.get().strip()
+                password = self.password_var.get()
+                if not username or not password:
+                    self._log("저장된 세션이 없습니다. 아이디와 비밀번호를 입력한 뒤 다시 눌러주세요.")
+                    self._set_status("상태: 아이디/비밀번호 입력 필요")
+                    return
+                session = ig_api.login(label, username, password,
+                                       verification_code=verification_code,
+                                       proxy=config.API_PROXY, log=self._log)
+        except ig_api.LoginNeedsCode as need:
+            self._ask_code_and_retry(label, need)
+            return
+        except Exception as e:
+            self._log(f"로그인 실패: {e}")
+            self._set_status("상태: 로그인 실패")
+            bridge.remote_log("api_login_failed", str(e)[:500], force=True)
+            return
+
+        self.session = session
+        self.actions = ig_api
+        self.logged_in = True
+        self.password_var.set("")  # 화면에도 비밀번호를 남기지 않는다
+        who = ig_api.account_username(session)
+        self._log(f"'{label}' 접속 완료{f' (@{who})' if who else ''}.")
+        self._set_status(f"상태: 로그인됨 ({label}{f' / @{who}' if who else ''})")
+        bridge.remote_log("api_login_ok", f"account={label}", force=True)
+
+    def _ask_code_and_retry(self, label, need):
+        """2단계 인증/본인확인 코드를 받아 같은 흐름을 다시 탄다(코드는 저장하지 않는다)."""
+        from tkinter import simpledialog
+
+        def _prompt():
+            code = simpledialog.askstring("인증 코드", f"{need}\n\n받은 6자리 코드를 입력해 주세요.",
+                                          parent=self.root)
+            if not code:
+                self._log("인증 코드 입력이 취소됐습니다.")
+                self._set_status("상태: 인증 코드 필요")
+                return
+            threading.Thread(target=self._api_login_flow, args=(label, code.strip()),
+                             daemon=True).start()
+
+        self.root.after(0, _prompt)
 
     def _login_flow(self, label):
         import browser
@@ -146,6 +243,8 @@ class App:
             poll_cb=lambda: self._set_status("상태: 로그인 대기 중..."))
         if ok:
             self.logged_in = True
+            self.session = self.driver
+            self.actions = ig
             self._log(f"'{label}' 로그인 확인됨.")
             self._set_status(f"상태: 로그인됨 ({label})")
             bridge.remote_log("login_ok", f"account={label}", force=True)
@@ -155,15 +254,18 @@ class App:
             bridge.remote_log("login_timeout", f"account={label}", force=True)
 
     def on_logout_click(self):
-        if self.driver is None:
-            messagebox.showinfo("안내", "먼저 로그인/계정 전환을 눌러 브라우저를 여세요.")
+        if self.session is None:
+            messagebox.showinfo("안내", "먼저 로그인/계정 전환을 눌러주세요.")
             return
         threading.Thread(target=self._logout_flow, daemon=True).start()
 
     def _logout_flow(self):
-        import instagram_actions as ig
-        ig.logout(self.driver, log=self._log)
+        try:
+            self.actions.logout(self.session, log=self._log)
+        except Exception as e:
+            self._log(f"로그아웃 처리 중 오류: {e}")
         self.logged_in = False
+        self.session = None
         self._set_status("상태: 로그아웃됨")
         bridge.remote_log("logout", f"account={self.account_var.get().strip()}", force=True)
 
@@ -193,7 +295,7 @@ class App:
         if self.engine is not None and self.engine.is_alive():
             messagebox.showinfo("안내", "이미 실행 중입니다.")
             return
-        if self.driver is None or not self.logged_in:
+        if self.session is None or not self.logged_in:
             messagebox.showerror("오류", "먼저 계정 로그인을 완료해 주세요.")
             return
         if not self.rows:
@@ -204,10 +306,22 @@ class App:
         import macro_engine
         label = self.account_var.get().strip() or "default"
         self.engine = macro_engine.MacroEngine(
-            self.driver, self.rows, self.excel_var.get().strip(), label,
-            log_cb=self._log, done_cb=self._on_row_done)
+            self.session, self.rows, self.excel_var.get().strip(), label,
+            log_cb=self._log, done_cb=self._on_row_done,
+            daily_cap=settings.get_daily_cap(), halt_cb=self._on_halt,
+            actions=self.actions)
         self.engine.start()
         self._log("매크로를 시작합니다.")
+
+    def _on_halt(self, reason, message):
+        """엔진이 스스로 멈췄을 때: 로그만으로는 놓치기 쉬우니 팝업으로 확실히 알린다."""
+        def _show():
+            self.status_var.set(f"상태: 중단됨 ({reason.split(':', 1)[0]})")
+            messagebox.showwarning("매크로 중단", message)
+        try:
+            self.root.after(0, _show)
+        except Exception:
+            pass
 
     def _on_row_done(self, row_no, follow_ok, dm_ok):
         if self.engine:

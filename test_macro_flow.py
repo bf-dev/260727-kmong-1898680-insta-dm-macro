@@ -197,12 +197,47 @@ def _make_excel(path):
     wb.save(path)
 
 
+class FakeApiActions:
+    """ig_api 와 같은 모양의 가짜 액션 모듈. 차단/실패 시나리오를 결정적으로 재현한다."""
+
+    SELECTOR_MISS_DETAILS = frozenset()
+
+    def __init__(self, block_on_row=None, fail_rows=(), fail_detail="dm_rejected"):
+        self.block_on_row = block_on_row
+        self.fail_rows = set(fail_rows)
+        self.fail_detail = fail_detail
+        self.followed = []
+        self.sent = {}
+        self.restriction = None
+
+    def _row_no_of(self, username):
+        return {"alice_test": 2, "bob_test": 3, "carol_test": 4}.get(username)
+
+    def follow_profile(self, session, profile_url, log=print):
+        username = profile_url.rstrip("/").split("/")[-1]
+        if self._row_no_of(username) == self.block_on_row:
+            self.restriction = "action_block:feedback_required"
+            return ig.ActionResult(False, "follow_blocked")
+        self.followed.append(username)
+        return ig.ActionResult(True, "followed")
+
+    def send_dm(self, session, username, message, log=print):
+        if self._row_no_of(username) in self.fail_rows:
+            return ig.ActionResult(False, self.fail_detail)
+        self.sent[username] = message
+        return ig.ActionResult(True, "sent")
+
+    def detect_restriction(self, session):
+        return self.restriction
+
+
 class MacroFlowTests(unittest.TestCase):
     def setUp(self):
         fd, self.xlsx_path = tempfile.mkstemp(suffix=".xlsx", dir=_TMP)
         os.close(fd)
         _make_excel(self.xlsx_path)
         progress_store.reset(self.xlsx_path, "test_account")
+        progress_store.reset_daily_count("test_account")
 
     def test_follow_then_dm_single_row(self):
         driver = FakeDriver()
@@ -280,6 +315,164 @@ class MacroFlowTests(unittest.TestCase):
         # 실패도 '명시적 실패'라 재시도 대상이 아니라 완료 처리되어(중복 DM 방지) 있어야 한다
         done = progress_store.load_done_rows(self.xlsx_path, "test_account")
         self.assertEqual(done, {2, 3, 4})
+
+
+class DailyCapTests(unittest.TestCase):
+    """하루 상한: 상한에 닿으면 스스로 멈추고, 남은 사람은 다음 날 이어서 처리돼야 한다."""
+
+    def setUp(self):
+        fd, self.xlsx_path = tempfile.mkstemp(suffix=".xlsx", dir=_TMP)
+        os.close(fd)
+        _make_excel(self.xlsx_path)
+        progress_store.reset(self.xlsx_path, "cap_account")
+        progress_store.reset_daily_count("cap_account")
+
+    def test_stops_at_daily_cap_and_leaves_rest_for_tomorrow(self):
+        actions = FakeApiActions()
+        rows, _ = excel_reader.load_rows(self.xlsx_path)
+        engine = macro_engine.MacroEngine(object(), rows, self.xlsx_path, "cap_account",
+                                          log_cb=lambda *_: None, daily_cap=2, actions=actions)
+        engine.run()
+
+        self.assertEqual(engine.halt_reason, "daily_cap")
+        self.assertEqual(len(actions.sent), 2)  # 3명 중 2명만
+        self.assertEqual(progress_store.get_daily_count("cap_account"), 2)
+        # 처리한 2명만 완료 처리되어야 한다(나머지는 내일 이어서)
+        self.assertEqual(len(progress_store.load_done_rows(self.xlsx_path, "cap_account")), 2)
+
+    def test_already_at_cap_does_nothing(self):
+        progress_store.bump_daily_count("cap_account", 5)
+        actions = FakeApiActions()
+        rows, _ = excel_reader.load_rows(self.xlsx_path)
+        engine = macro_engine.MacroEngine(object(), rows, self.xlsx_path, "cap_account",
+                                          log_cb=lambda *_: None, daily_cap=5, actions=actions)
+        engine.run()
+        self.assertEqual(engine.halt_reason, "daily_cap")
+        self.assertEqual(actions.sent, {})
+        self.assertEqual(actions.followed, [])
+
+    def test_daily_count_is_per_account_not_per_excel(self):
+        progress_store.reset_daily_count("acc_a")
+        progress_store.reset_daily_count("acc_b")
+        progress_store.bump_daily_count("acc_a", 3)
+        self.assertEqual(progress_store.get_daily_count("acc_a"), 3)
+        self.assertEqual(progress_store.get_daily_count("acc_b"), 0)
+
+
+class HaltOnBlockTests(unittest.TestCase):
+    """차단 감지: 감지 즉시 멈추고, 그 행은 완료 처리하지 않아야 한다(다음에 재시도)."""
+
+    def setUp(self):
+        fd, self.xlsx_path = tempfile.mkstemp(suffix=".xlsx", dir=_TMP)
+        os.close(fd)
+        _make_excel(self.xlsx_path)
+        progress_store.reset(self.xlsx_path, "block_account")
+        progress_store.reset_daily_count("block_account")
+
+    def test_action_block_halts_batch_and_does_not_consume_the_row(self):
+        actions = FakeApiActions(block_on_row=3)  # bob 처리 중 차단
+        rows, _ = excel_reader.load_rows(self.xlsx_path)
+        halts = []
+        engine = macro_engine.MacroEngine(object(), rows, self.xlsx_path, "block_account",
+                                          log_cb=lambda *_: None, daily_cap=50,
+                                          halt_cb=lambda r, m: halts.append(r), actions=actions)
+        engine.run()
+
+        self.assertEqual(engine.halt_reason, "action_block:feedback_required")
+        self.assertEqual(halts, ["action_block:feedback_required"])
+        # alice 는 처리됐고, bob 에서 멈췄으므로 carol 은 손도 대지 않아야 한다.
+        self.assertIn("alice_test", actions.sent)
+        self.assertNotIn("bob_test", actions.sent)
+        self.assertNotIn("carol_test", actions.sent)
+        # 차단된 bob 행은 완료 처리되면 안 된다(다음 실행에 다시 시도해야 하므로).
+        done = progress_store.load_done_rows(self.xlsx_path, "block_account")
+        self.assertEqual(done, {2})
+        self.assertEqual(progress_store.get_daily_count("block_account"), 1)
+
+    def test_consecutive_failures_halt(self):
+        actions = FakeApiActions(fail_rows=(2, 3, 4))
+        rows, _ = excel_reader.load_rows(self.xlsx_path)
+        engine = macro_engine.MacroEngine(object(), rows, self.xlsx_path, "block_account",
+                                          log_cb=lambda *_: None, daily_cap=50, actions=actions)
+        engine.run()
+        self.assertEqual(engine.halt_reason, "consecutive_failures")
+        self.assertEqual(engine.stats["failed"], config.CONSECUTIVE_FAILURE_HALT)
+
+    def test_halt_message_covers_every_reason(self):
+        for reason in ("daily_cap", "challenge", "logged_out", "account_suspended",
+                       "action_block:feedback_required", "consecutive_failures",
+                       "selector_drift"):
+            self.assertNotIn("사유:", macro_engine.halt_message(reason), reason)
+
+
+class SelectorMissTests(unittest.TestCase):
+    """셀렉터 미스: 일반 실패와 구분해 selector-miss 로 따로 올리고, 연속되면 멈춘다."""
+
+    def setUp(self):
+        fd, self.xlsx_path = tempfile.mkstemp(suffix=".xlsx", dir=_TMP)
+        os.close(fd)
+        _make_excel(self.xlsx_path)
+        progress_store.reset(self.xlsx_path, "sel_account")
+        progress_store.reset_daily_count("sel_account")
+
+    def test_selector_miss_uploads_its_own_kind(self):
+        uploaded = []
+        original = bridge.upload_run
+        bridge.upload_run = lambda summary, zip_path=None, kind="run": uploaded.append(kind)
+        try:
+            driver = FakeDriver()
+            driver._not_found_usernames.add("bob_test")
+            rows, _ = excel_reader.load_rows(self.xlsx_path)
+            engine = macro_engine.MacroEngine(driver, rows, self.xlsx_path, "sel_account",
+                                              log_cb=lambda *_: None, daily_cap=50)
+            engine.run()
+        finally:
+            bridge.upload_run = original
+        self.assertIn("selector-miss", uploaded)
+        self.assertIsNone(engine.halt_reason)  # 1건만으로는 멈추지 않는다
+
+    def test_repeated_selector_miss_halts(self):
+        driver = FakeDriver()
+        for u in ("alice_test", "bob_test", "carol_test"):
+            driver._not_found_usernames.add(u)
+        rows, _ = excel_reader.load_rows(self.xlsx_path)
+        engine = macro_engine.MacroEngine(driver, rows, self.xlsx_path, "sel_account",
+                                          log_cb=lambda *_: None, daily_cap=50)
+        engine.run()
+        self.assertEqual(engine.halt_reason, "selector_drift")
+
+
+class RestrictionDetectionTests(unittest.TestCase):
+    """웹 UI 엔진의 차단 화면 감지 - 평범한 화면을 차단으로 오판하면 안 된다."""
+
+    class _Page:
+        def __init__(self, url, text):
+            self.current_url = url
+            self._text = text
+
+        def find_element(self, by, value):
+            return FakeElement(tag="body", text=self._text)
+
+    def test_detects_action_block_text(self):
+        page = self._Page("https://www.instagram.com/someone/", "작업이 차단됨\n나중에 다시 시도해 주세요")
+        self.assertTrue(str(ig.detect_restriction(page)).startswith("action_block"))
+
+    def test_detects_challenge_url(self):
+        page = self._Page("https://www.instagram.com/challenge/?next=/", "")
+        self.assertEqual(ig.detect_restriction(page), "challenge")
+
+    def test_detects_logged_out(self):
+        page = self._Page("https://www.instagram.com/accounts/login/?next=/", "")
+        self.assertEqual(ig.detect_restriction(page), "logged_out")
+
+    def test_normal_profile_page_is_not_a_block(self):
+        page = self._Page("https://www.instagram.com/alice_test/",
+                          "게시물 120 팔로워 3,400 팔로우 180 안녕하세요 프로필 소개입니다 팔로우 메시지")
+        self.assertIsNone(ig.detect_restriction(page))
+
+    def test_long_page_is_not_scanned_for_false_positives(self):
+        page = self._Page("https://www.instagram.com/alice_test/", "댓글 " * 3000 + "try again later")
+        self.assertIsNone(ig.detect_restriction(page))
 
 
 if __name__ == "__main__":
