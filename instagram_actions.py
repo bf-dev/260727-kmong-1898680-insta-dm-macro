@@ -16,6 +16,7 @@
 import random
 import time
 
+from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
@@ -31,6 +32,8 @@ UNFOLLOW_HINT_TEXTS = {"message", "메시지", "메시지 보내기"}  # 이미 
 MESSAGE_BUTTON_TEXTS = {"message", "메시지", "메시지 보내기", "send message"}
 # 받은편지함의 [새로운 메시지](연필) 아이콘 svg aria-label.
 NEW_MESSAGE_LABELS = ("새로운 메시지", "New message")
+# 채팅 위젯/다이얼로그 닫기 버튼 svg aria-label.
+CLOSE_LABELS = ("닫기", "Close")
 # 새 메시지 다이얼로그에서 상대를 고른 뒤 누르는 확인 버튼.
 CHAT_CONFIRM_TEXTS = {"채팅", "chat", "다음", "next"}
 
@@ -122,13 +125,51 @@ def is_logged_in(driver):
         for f in driver.find_elements(By.CSS_SELECTOR, "input[type='password']"):
             if f.is_displayed():
                 return False
-        return True
     except Exception:
         return False
+    # 2026-07-31 고객 리포트(계정 전환 안 됨): 비밀번호 입력칸이 안 보인다고 곧바로 로그인된
+    # 것으로 판정하면 안 된다. 완전히 새(쿠키 없는) 크롬 프로필로 처음 instagram.com/ 에 가도
+    # 마케팅 랜딩 화면이 "로그인"/"가입하기" 버튼만 보여주고 비밀번호 칸은 그 버튼을 눌러야
+    # 나타난다 - 그 상태에서 결과가 True 로 새면, 별명을 "Jimin"->"Jimin2" 로 바꿔 새 프로필로
+    # 크롬을 새로 띄워도 "이미 로그인되어 있습니다"로 오판해 실제로는 로그인 안 된 빈 세션을
+    # 그대로 쓰게 된다(다른 계정으로 전환이 안 되는 것처럼 보이는 근본 원인). 그래서 실제
+    # 로그인 성공 시에만 심어지는 sessionid 쿠키가 있을 때만 True 를 반환한다
+    # (`_login_appears_complete` 가 이미 쓰는 것과 같은 신호).
+    try:
+        cookies = driver.get_cookies()
+    except Exception:
+        return False
+    return any(c.get("name") == "sessionid" and c.get("value") for c in cookies)
 
 
 def goto_login_screen(driver):
     driver.get(config.INSTAGRAM_LOGIN_URL)
+
+
+def current_username(driver):
+    """지금 로그인된 인스타 아이디를 읽는다(못 읽으면 None).
+
+    별명만 보고는 어떤 계정이 붙어 있는지 알 수 없어서 '계정 전환이 안 된다'는 상황을 진단할 수
+    없다. 페이지 이동 없이 현재 화면에서만 읽는다.
+    """
+    try:
+        name = driver.execute_script(
+            "var m=document.documentElement.innerHTML.match("
+            "/\"username\"\\s*:\\s*\"([A-Za-z0-9._]{1,30})\"/); return m ? m[1] : null;")
+        if name:
+            return name
+    except Exception:
+        pass
+    try:
+        for a in driver.find_elements(By.CSS_SELECTOR, "a[href^='/'][role='link']"):
+            href = (a.get_attribute("href") or "").rstrip("/")
+            slug = href.rsplit("/", 1)[-1]
+            img = a.find_elements(By.CSS_SELECTOR, "img[alt*='프로필'], img[alt*='profile']")
+            if img and slug:
+                return slug
+    except Exception:
+        pass
+    return None
 
 
 def _login_appears_complete(driver):
@@ -290,6 +331,104 @@ def _type_like_human(element, text):
         time.sleep(random.uniform(config.TYPE_JITTER_MIN, config.TYPE_JITTER_MAX))
 
 
+def _type_into(driver, finder, text, attempts=3):
+    """타이핑 도중 요소가 stale 이 돼도 다시 찾아서 이어친다. 성공하면 실제로 입력한 요소를 반환.
+
+    2026-07-31 실측: 새 메시지 다이얼로그는 첫 글자 입력 직후 리스트를 다시 그리면서 입력 요소를
+    교체한다. 한 번 잡은 element 로 끝까지 send_keys 하면 StaleElementReferenceException 이
+    나고, 그게 그대로 위로 튀어 그 행 전체가 예외로 죽었다(고객 리포트: 4~5번째 행 연속 중단).
+
+    반환값이 '입력에 성공한 그 요소'인 게 중요하다. Enter 는 반드시 같은 요소에 눌러야 한다 -
+    다시 찾아서 누르면 그 사이 리렌더된 빈 입력창에 Enter 를 눌러 빈 메시지가 나갈 수 있다.
+    """
+    for attempt in range(attempts):
+        el = finder()
+        if el is None:
+            return None
+        try:
+            el.clear()
+        except Exception:
+            pass
+        try:
+            _type_like_human(el, text)
+            return el
+        except StaleElementReferenceException:
+            if attempt == attempts - 1:
+                return None
+            time.sleep(0.6)
+        except Exception:
+            return None
+    return None
+
+
+def _dialog_scope(driver, require_input=False):
+    """열려 있는 모달(새 메시지 창)만 골라낸다. 없으면 None.
+
+    받은편지함 화면에는 왼쪽 사이드바에도 '검색' 입력창이 있어서, 다이얼로그로 범위를 좁히지
+    않으면 사이드바 입력창을 잡아 엉뚱한 곳에 타이핑하게 된다(실제로 그래서 실패했다).
+
+    화면에는 알림 허용 안내 같은 다른 모달이 같이 떠 있을 수 있다. 그냥 '첫 번째 모달'을
+    잡으면 입력창이 없는 안내 모달을 잡는다(실측). require_input 이면 입력창을 가진 모달만
+    고른다.
+    """
+    best = None
+    for d in driver.find_elements(By.CSS_SELECTOR, "div[role='dialog']"):
+        try:
+            if not d.is_displayed():
+                continue
+            if require_input:
+                if any(i.is_displayed() for i in d.find_elements(By.CSS_SELECTOR, "input")):
+                    return d
+                continue
+            if best is None:
+                best = d
+        except Exception:
+            continue
+    return best
+
+
+def _safe_click(driver, el):
+    """일반 클릭이 다른 요소에 가로막히면(overlay) JS 클릭으로 한 번 더 시도한다."""
+    try:
+        el.click()
+        return True
+    except Exception:
+        pass
+    try:
+        driver.execute_script("arguments[0].click();", el)
+        return True
+    except Exception:
+        return False
+
+
+def close_open_chat_widget(driver):
+    """프로필 위에 떠 있는 채팅 위젯을 닫는다.
+
+    [메시지] 버튼으로 연 대화창은 프로필을 벗어나도 남아 있을 수 있다. 그대로 두면 다음 사람
+    프로필에서 '이전 사람의 입력창'을 잡아 엉뚱한 사람에게 메시지를 보낼 수 있다(오발송).
+    """
+    for label in CLOSE_LABELS:
+        try:
+            svgs = driver.find_elements(By.CSS_SELECTOR, f"svg[aria-label='{label}']")
+        except Exception:
+            continue
+        for svg in svgs:
+            try:
+                target = svg.find_element(
+                    By.XPATH, "ancestor::*[self::button or @role='button'][1]")
+            except Exception:
+                target = svg
+            try:
+                if not target.is_displayed():
+                    continue
+            except Exception:
+                continue
+            if _safe_click(driver, target):
+                time.sleep(0.4)
+                return True
+    return False
+
+
 def _find_message_box(driver):
     candidates = driver.find_elements(
         By.XPATH,
@@ -332,11 +471,8 @@ def _click_text_button(driver, texts):
         except Exception:
             continue
         if t in texts:
-            try:
-                el.click()
+            if _safe_click(driver, el):
                 return True
-            except Exception:
-                continue
     return False
 
 
@@ -364,7 +500,15 @@ def _open_thread_via_profile(driver, username, log=print):
     if "sorry, this page" in page_text or "페이지를 사용할 수 없" in page_text:
         return None, "profile_not_found"
 
-    if not _click_text_button(driver, MESSAGE_BUTTON_TEXTS):
+    # [메시지] 버튼은 프로필 헤더가 늦게 그려지면 한 박자 뒤에 나타난다. 한 번만 훑고 포기하면
+    # 멀쩡한 프로필에서도 실패하므로 잠깐 폴링한다.
+    clicked = False
+    deadline = time.time() + config.WAIT_TIMEOUT
+    while time.time() < deadline and not clicked:
+        clicked = _click_text_button(driver, MESSAGE_BUTTON_TEXTS)
+        if not clicked:
+            time.sleep(0.6)
+    if not clicked:
         return None, "message_button_not_found"
     log(f"프로필에서 [메시지] 클릭: @{username}")
     box = _wait_for_message_box(driver)
@@ -397,12 +541,9 @@ def _open_thread_via_new_message(driver, username, log=print):
                 target = svg.find_element(By.XPATH, "ancestor::*[self::button or @role='button'][1]")
             except Exception:
                 target = svg
-            try:
-                target.click()
+            if _safe_click(driver, target):
                 opened = True
                 break
-            except Exception:
-                continue
         if opened:
             break
     if not opened:
@@ -410,30 +551,46 @@ def _open_thread_via_new_message(driver, username, log=print):
 
     time.sleep(random.uniform(config.PRE_TYPE_PAUSE_MIN, config.PRE_TYPE_PAUSE_MAX))
 
-    # 검색창에 아이디 입력
+    def _find_search_box():
+        """다이얼로그 안의 검색 입력만 고른다(사이드바 검색창을 잡으면 안 된다)."""
+        scope = _dialog_scope(driver, require_input=True)
+        if scope is None:
+            return None
+        for el in scope.find_elements(By.CSS_SELECTOR, "input"):
+            try:
+                if el.is_displayed():
+                    return el
+            except Exception:
+                continue
+        return None
+
     search = None
     deadline = time.time() + config.WAIT_TIMEOUT
     while time.time() < deadline and search is None:
-        for el in driver.find_elements(By.CSS_SELECTOR, "input[type='text'], input[name='queryBox']"):
-            try:
-                if el.is_displayed():
-                    search = el
-                    break
-            except Exception:
-                continue
+        search = _find_search_box()
         if search is None:
             time.sleep(0.5)
     if search is None:
         return None, "dm_search_box_not_found"
 
-    _type_like_human(search, username)
+    # 첫 글자 입력 직후 다이얼로그가 리스트를 다시 그리며 input 을 교체한다 -> stale 재조회 필요.
+    if not _type_into(driver, _find_search_box, username):
+        return None, "dm_search_box_not_found"
     time.sleep(random.uniform(1.2, 2.2))  # 검색 결과가 뜰 시간
 
     # 결과 목록에서 정확히 이 아이디인 행을 고른다(부분 일치 계정 오발송 방지).
+    # 반드시 다이얼로그 안에서만 찾는다 - 뒤에 깔린 대화 목록에도 같은 이름이 있을 수 있다.
     picked = False
     deadline = time.time() + config.WAIT_TIMEOUT
     while time.time() < deadline and not picked:
-        for el in driver.find_elements(By.XPATH, "//div[@role='button'] | //label | //li"):
+        scope = _dialog_scope(driver, require_input=True)
+        rows = []
+        if scope is not None:
+            try:
+                rows = scope.find_elements(By.XPATH, ".//div[@role='button'] | .//label | .//li")
+            except Exception:
+                rows = []
+        for el in rows:
             try:
                 if not el.is_displayed():
                     continue
@@ -441,12 +598,9 @@ def _open_thread_via_new_message(driver, username, log=print):
             except Exception:
                 continue
             if username.lower() in lines:
-                try:
-                    el.click()
+                if _safe_click(driver, el):
                     picked = True
                     break
-                except Exception:
-                    continue
         if not picked:
             time.sleep(0.6)
     if not picked:
@@ -460,13 +614,10 @@ def _open_thread_via_new_message(driver, username, log=print):
     return box, ("ok" if box is not None else "message_box_not_found")
 
 
-def send_dm(driver, username, message, log=print):
-    """해당 유저와의 DM 스레드를 열고 메시지를 전송한다.
+def _send_dm_once(driver, username, message, log=print):
+    # 이전 사람의 채팅 위젯이 떠 있으면 그 입력창을 잡아 '엉뚱한 사람'에게 보낼 수 있다.
+    close_open_chat_widget(driver)
 
-    경로 1) 프로필의 [메시지] 버튼 (기본)
-    경로 2) 받은편지함 [새로운 메시지] -> 검색 -> [채팅] (폴백)
-    두 경로 모두 인스타 실제 UI 클릭이라 딥링크처럼 조용히 죽지 않는다.
-    """
     box, detail = _open_thread_via_profile(driver, username, log=log)
     if box is None:
         if detail == "profile_not_found":
@@ -479,11 +630,41 @@ def send_dm(driver, username, message, log=print):
     try:
         box.click()
         time.sleep(random.uniform(config.PRE_TYPE_PAUSE_MIN, config.PRE_TYPE_PAUSE_MAX))
-        _type_like_human(box, message)
+        typed = _type_into(driver, lambda: _find_message_box(driver), message)
+        if typed is None:
+            return ActionResult(False, "dm_typing_failed")
         time.sleep(random.uniform(config.POST_TYPE_PAUSE_MIN, config.POST_TYPE_PAUSE_MAX))
-        box.send_keys(Keys.RETURN)
+        # Enter 는 방금 입력한 그 요소에 눌러야 한다(빈 메시지 발송 방지).
+        typed.send_keys(Keys.RETURN)
         time.sleep(random.uniform(config.POST_SEND_PAUSE_MIN, config.POST_SEND_PAUSE_MAX))
         log(f"DM 발송 완료: @{username}")
         return ActionResult(True, "sent")
     except Exception as e:
         return ActionResult(False, f"dm_send_failed: {e}")
+    finally:
+        # 보냈든 실패했든 위젯을 닫아 다음 사람에게 상태가 새지 않게 한다.
+        close_open_chat_widget(driver)
+
+
+def send_dm(driver, username, message, log=print):
+    """해당 유저와의 DM 스레드를 열고 메시지를 전송한다.
+
+    경로 1) 프로필의 [메시지] 버튼 (기본)
+    경로 2) 받은편지함 [새로운 메시지] -> 검색 -> [채팅] (폴백)
+    두 경로 모두 인스타 실제 UI 클릭이라 딥링크처럼 조용히 죽지 않는다.
+
+    인스타 화면이 다시 그려지는 순간에 걸리면(stale) 한 번 더 시도한다. 여기서 예외를 그대로
+    올리면 그 행이 통째로 죽고 연속 실패로 배치가 멈춘다(2026-07-31 고객 리포트: 4,5번째 행).
+    """
+    last = None
+    for attempt in range(2):
+        try:
+            last = _send_dm_once(driver, username, message, log=log)
+        except StaleElementReferenceException as e:
+            last = ActionResult(False, f"dm_stale_retry: {e}")
+        if last.ok or last.detail == "profile_not_found":
+            return last
+        if attempt == 0:
+            log(f"DM 재시도: @{username} ({last.detail})")
+            time.sleep(random.uniform(1.5, 3.0))
+    return last

@@ -82,6 +82,33 @@ class LoginAppearsCompleteTests(unittest.TestCase):
         self.assertEqual(d.refresh_calls, 0)
 
 
+class IsLoggedInTests(unittest.TestCase):
+    """is_logged_in(): 2026-07-31 계정 전환 리포트("Jimin2 로 바꿔도 Jimin 세션에 머무는 것
+    처럼 보임") 회귀 테스트. 새 프로필의 마케팅 랜딩 화면(비밀번호 칸 없음, 세션 쿠키도 없음)을
+    로그인된 것으로 오판하면 안 된다 - 그러면 앱이 새 로그인을 요청하지 않고 넘어가 버린다."""
+
+    def test_login_url_is_not_logged_in(self):
+        d = FakeDriver("https://www.instagram.com/accounts/login/", password_visible=True,
+                       has_session_cookie=False)
+        self.assertFalse(ig.is_logged_in(d))
+
+    def test_password_field_visible_is_not_logged_in(self):
+        d = FakeDriver("https://www.instagram.com/", password_visible=True,
+                       has_session_cookie=False)
+        self.assertFalse(ig.is_logged_in(d))
+
+    def test_fresh_profile_landing_page_without_session_cookie_is_not_logged_in(self):
+        # 완전히 새 프로필: 비밀번호 칸도 안 보이고(랜딩 화면) 세션 쿠키도 없다 - 로그인 아님.
+        d = FakeDriver("https://www.instagram.com/", password_visible=False,
+                       has_session_cookie=False)
+        self.assertFalse(ig.is_logged_in(d))
+
+    def test_real_session_cookie_present_is_logged_in(self):
+        d = FakeDriver("https://www.instagram.com/", password_visible=False,
+                       has_session_cookie=True)
+        self.assertTrue(ig.is_logged_in(d))
+
+
 class WaitForManualLoginNoReloadTests(unittest.TestCase):
     def test_polling_loop_never_calls_get_or_refresh(self):
         """핵심 회귀 테스트: 로그인 대기 루프가 완료될 때까지 driver.get()/refresh() 를
@@ -130,6 +157,65 @@ class WaitForManualLoginNoReloadTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(d.get_calls, 0)
         self.assertEqual(d.refresh_calls, 0)
+
+
+class StaleTypingTests(unittest.TestCase):
+    """_type_into: 타이핑 도중 요소가 stale 이 돼도 다시 찾아 이어친다.
+    (2026-07-31 고객 리포트: 새 메시지 검색창이 리렌더되며 4,5번째 행이 연속 예외로 죽음)"""
+
+    def test_retries_after_stale_element(self):
+        from selenium.common.exceptions import StaleElementReferenceException
+
+        class Flaky:
+            def __init__(self, fail_after):
+                self.fail_after = fail_after
+                self.typed = []
+
+            def clear(self):
+                pass
+
+            def send_keys(self, ch):
+                if self.fail_after is not None and len(self.typed) >= self.fail_after:
+                    raise StaleElementReferenceException("gone")
+                self.typed.append(ch)
+
+        boxes = [Flaky(fail_after=2), Flaky(fail_after=None)]
+        state = {"i": 0}
+
+        def finder():
+            el = boxes[min(state["i"], len(boxes) - 1)]
+            state["i"] += 1
+            return el
+
+        original_sleep = ig.time.sleep
+        ig.time.sleep = lambda s: None
+        try:
+            ok = ig._type_into(None, finder, "abcdef")
+        finally:
+            ig.time.sleep = original_sleep
+
+        self.assertTrue(ok, "stale 이 나면 새 요소를 찾아 다시 쳐야 한다")
+        self.assertEqual("".join(boxes[1].typed), "abcdef")
+
+    def test_gives_up_when_element_never_appears(self):
+        self.assertFalse(ig._type_into(None, lambda: None, "abc"))
+
+
+class ProfileDirIsolationTests(unittest.TestCase):
+    """별명이 다르면 크롬 프로필도 반드시 달라야 한다. 같아지면 계정 전환이 안 된다."""
+
+    def test_labels_differing_only_by_stripped_chars_do_not_collide(self):
+        import config
+        a = config.profile_dir_for("Jimin")
+        b = config.profile_dir_for("Jimin!")
+        c = config.profile_dir_for("Ji min")
+        self.assertNotEqual(a, b)
+        self.assertNotEqual(a, c)
+        self.assertNotEqual(b, c)
+
+    def test_same_label_is_stable(self):
+        import config
+        self.assertEqual(config.profile_dir_for("Jimin2"), config.profile_dir_for("Jimin2"))
 
 
 if __name__ == "__main__":

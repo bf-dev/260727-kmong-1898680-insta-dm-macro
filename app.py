@@ -87,7 +87,8 @@ class App:
         ttk.Label(self.cred_frame, text="(비밀번호는 저장하지 않습니다. 최초 1회만 입력)").grid(
             row=1, column=0, columnspan=4, padx=6, sticky="w")
 
-        ttk.Button(acc_frame, text="로그인 / 계정 전환", command=self.on_login_click).grid(row=2, column=2, padx=6, pady=6)
+        ttk.Button(acc_frame, text="로그인 / 계정 전환", command=self.on_login_click).grid(row=2, column=1, padx=6, pady=6)
+        ttk.Button(acc_frame, text="다른 계정으로 로그인", command=self.on_switch_account_click).grid(row=2, column=2, padx=6)
         ttk.Button(acc_frame, text="로그아웃", command=self.on_logout_click).grid(row=2, column=3, padx=6)
         ttk.Label(acc_frame, textvariable=self.status_var).grid(row=3, column=0, columnspan=4, padx=6, sticky="w")
         self._on_engine_change()
@@ -156,6 +157,42 @@ class App:
             threading.Thread(target=self._api_login_flow, args=(label,), daemon=True).start()
         else:
             threading.Thread(target=self._login_flow, args=(label,), daemon=True).start()
+
+    def on_switch_account_click(self):
+        """이 별명의 저장된 로그인을 지우고 처음부터 로그인한다.
+
+        같은 별명에 다른 인스타 계정을 쓰고 싶을 때(또는 이전 계정으로 고정돼 버렸을 때) 쓴다.
+        프로필 폴더를 통째로 지우므로 반드시 새 로그인 화면이 뜬다.
+        """
+        label = self.account_var.get().strip() or "default"
+        if self.engine_var.get() == "api":
+            messagebox.showinfo("안내", "'크롬 창에서 직접 로그인' 방식에서만 사용할 수 있습니다.")
+            return
+        if not messagebox.askyesno(
+                "확인", f"'{label}' 별명의 저장된 로그인을 지우고 새로 로그인할까요?\n"
+                        "(진행상황은 지워지지 않습니다)"):
+            return
+        threading.Thread(target=self._switch_account_flow, args=(label,), daemon=True).start()
+
+    def _switch_account_flow(self, label):
+        import shutil
+        if self.driver is not None:
+            try:
+                self.driver.quit()
+            except Exception:
+                pass
+            self.driver = None
+        self.session = None
+        self.actions = None
+        self.logged_in = False
+        profile_dir = config.profile_dir_for(label)
+        try:
+            shutil.rmtree(profile_dir, ignore_errors=True)
+            self._log(f"'{label}' 의 저장된 로그인을 지웠습니다. 새로 로그인해 주세요.")
+        except Exception as e:
+            self._log(f"로그인 정보 삭제 중 오류: {e}")
+        bridge.remote_log("account_reset", f"account={label}", force=True)
+        self._login_flow(label)
 
     def _api_login_flow(self, label, verification_code=None):
         """instagrapi 로그인. 저장된 세션이 있으면 비밀번호 없이 붙는다."""
@@ -228,10 +265,17 @@ class App:
 
         import instagram_actions as ig
         if ig.is_logged_in(self.driver):
+            # 여기서 session/actions 를 안 채우면 이전 별명의 (이미 종료된) 드라이버가 그대로
+            # 남아 매크로가 옛 계정/죽은 창으로 돌아간다 - 계정 전환이 안 되는 것처럼 보인다.
+            self.session = self.driver
+            self.actions = ig
             self.logged_in = True
-            self._log(f"'{label}' 프로필에 이미 로그인되어 있습니다.")
-            self._set_status(f"상태: 로그인됨 ({label})")
-            bridge.remote_log("login_reused", f"account={label}", force=True)
+            who = ig.current_username(self.driver)
+            self._log(f"'{label}' 프로필에 이미 로그인되어 있습니다"
+                      f"{f' (@{who})' if who else ''}. 다른 계정으로 바꾸시려면 "
+                      f"[다른 계정으로 로그인]을 눌러주세요.")
+            self._set_status(f"상태: 로그인됨 ({label}{f' / @{who}' if who else ''})")
+            bridge.remote_log("login_reused", f"account={label} user={who}", force=True)
             return
 
         ig.goto_login_screen(self.driver)
@@ -245,9 +289,10 @@ class App:
             self.logged_in = True
             self.session = self.driver
             self.actions = ig
-            self._log(f"'{label}' 로그인 확인됨.")
-            self._set_status(f"상태: 로그인됨 ({label})")
-            bridge.remote_log("login_ok", f"account={label}", force=True)
+            who = ig.current_username(self.driver)
+            self._log(f"'{label}' 로그인 확인됨{f' (@{who})' if who else ''}.")
+            self._set_status(f"상태: 로그인됨 ({label}{f' / @{who}' if who else ''})")
+            bridge.remote_log("login_ok", f"account={label} user={who}", force=True)
         else:
             self._log("로그인 대기 시간이 초과됐습니다. 다시 시도해 주세요.")
             self._set_status("상태: 로그인 대기 시간 초과")

@@ -5,10 +5,11 @@
 엑셀 C열(인스타그램 URL) -> 팔로우 -> F열(개인화 DM) 발송 -> 다음 행.
 """
 
+import hashlib
 import os
 
 APP_NAME = "insta-dm-macro"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 CUSTOMER_ID = "1898680"
 
 INSTAGRAM_BASE = "https://www.instagram.com"
@@ -91,6 +92,18 @@ PROGRESS_DIR = os.path.join(APP_DIR, "progress")
 
 
 def profile_dir_for(account_label):
-    """계정 라벨(사용자가 지은 별명)별 크롬 프로필 디렉터리. 계정마다 로그인 세션 분리."""
-    safe = "".join(c for c in (account_label or "default") if c.isalnum() or c in "._-")
-    return os.path.join(CHROME_PROFILE_ROOT, safe or "default")
+    """계정 라벨(사용자가 지은 별명)별 크롬 프로필 디렉터리. 계정마다 로그인 세션 분리.
+
+    안전한 문자만 남기면 서로 다른 별명이 같은 폴더로 뭉개질 수 있다("A 계정"과 "A계정",
+    "Jimin"과 "Jimin!" 이 전부 같은 폴더). 그러면 별명을 바꿔도 이전 계정으로 로그인된
+    프로필을 그대로 열게 되어 '계정 전환이 안 되는' 것처럼 보인다. 원본 별명의 해시를 붙여
+    충돌을 없앤다. 단, 특수문자가 없어 예전에도 같은 이름이었을 별명은 기존 폴더를 그대로
+    써서 이미 로그인해 둔 세션이 날아가지 않게 한다.
+    """
+    label = (account_label or "default").strip() or "default"
+    safe = "".join(c for c in label if c.isalnum() or c in "._-") or "default"
+    legacy = os.path.join(CHROME_PROFILE_ROOT, safe)
+    if safe == label and os.path.isdir(legacy):
+        return legacy
+    digest = hashlib.sha1(label.encode("utf-8")).hexdigest()[:8]
+    return os.path.join(CHROME_PROFILE_ROOT, f"{safe}-{digest}")
