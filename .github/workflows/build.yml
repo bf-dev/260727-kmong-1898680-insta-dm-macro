@@ -39,6 +39,11 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python test_ig_api.py -v
 
+      - name: Unit test manual-login wait (no reload while typing - kmong 1898680 260731 bug)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python test_instagram_actions.py -v
+
       - name: Build exe (GUI, no console)
         run: >
           pyinstaller --onefile --noconsole

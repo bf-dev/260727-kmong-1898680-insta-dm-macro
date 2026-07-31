@@ -120,11 +120,43 @@ def goto_login_screen(driver):
     driver.get(config.INSTAGRAM_LOGIN_URL)
 
 
+def _login_appears_complete(driver):
+    """수동 로그인 대기 중 폴링 전용 체크. `is_logged_in()`과 달리 절대 driver.get()/refresh()를
+    호출하지 않는다 - 사람이 아이디/비번을 타이핑 중인 그 순간 페이지를 새로고침하면 입력값이
+    통째로 날아간다(2026-07-31 고객 리포트: 3초마다 크롬창이 새로고침돼 로그인 자체가
+    불가능했음 - 원인은 이 함수가 예전엔 is_logged_in()을 그대로 불러 매 폴링마다
+    driver.get(INSTAGRAM_BASE)를 실행했던 것). 여기서는 이미 브라우저에 떠 있는 상태만
+    읽는다: 현재 URL, 화면에 보이는 비밀번호 입력칸, 로그인 성공 시 인스타가 심어주는
+    sessionid 쿠키. 셋 다 페이지를 건드리지 않고도 읽을 수 있다."""
+    try:
+        url = (driver.current_url or "").lower()
+    except Exception:
+        return False
+    if "instagram.com" not in url:
+        return False
+    if "/accounts/login" in url:
+        return False
+    try:
+        for f in driver.find_elements(By.CSS_SELECTOR, "input[type='password']"):
+            if f.is_displayed():
+                return False
+    except Exception:
+        # DOM 조회 실패(예: 네비게이션 중간)는 아직 완료 아님으로 취급 - 페이지를 건드리지 않고 재시도
+        return False
+    try:
+        cookies = driver.get_cookies()
+    except Exception:
+        return False
+    return any(c.get("name") == "sessionid" and c.get("value") for c in cookies)
+
+
 def wait_for_manual_login(driver, timeout_s, poll_cb=None):
-    """사람이 직접 로그인 폼을 채우고 로그인할 때까지 폴링(타임아웃까지). 감지되면 True."""
+    """사람이 직접 로그인 폼을 채우고 로그인할 때까지 폴링(타임아웃까지). 감지되면 True.
+    폴링 중에는 절대 페이지를 새로고침/이동하지 않는다(`_login_appears_complete` 참고) -
+    사람이 타이핑하는 도중 창을 리로드하면 입력값이 날아가 로그인 자체를 못 한다."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        if is_logged_in(driver):
+        if _login_appears_complete(driver):
             return True
         if poll_cb:
             try:

@@ -8,7 +8,7 @@
 import os
 
 APP_NAME = "insta-dm-macro"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 CUSTOMER_ID = "1898680"
 
 INSTAGRAM_BASE = "https://www.instagram.com"
