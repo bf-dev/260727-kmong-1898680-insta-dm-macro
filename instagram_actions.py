@@ -587,7 +587,11 @@ def _open_thread_via_new_message(driver, username, log=print):
         rows = []
         if scope is not None:
             try:
-                rows = scope.find_elements(By.XPATH, ".//div[@role='button'] | .//label | .//li")
+                # 실측(2026-07-31): 검색 결과 한 줄은 div[role='option'] 이다.
+                # role='button'/label 만 보면 하나도 안 걸려 'dm_user_not_found_in_search' 가 난다.
+                rows = scope.find_elements(
+                    By.XPATH,
+                    ".//div[@role='option'] | .//div[@role='button'] | .//label | .//li")
             except Exception:
                 rows = []
         for el in rows:
