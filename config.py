@@ -8,7 +8,7 @@
 import os
 
 APP_NAME = "insta-dm-macro"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 CUSTOMER_ID = "1898680"
 
 INSTAGRAM_BASE = "https://www.instagram.com"
@@ -17,10 +17,12 @@ INSTAGRAM_LOGIN_URL = "https://www.instagram.com/accounts/login/"
 # 행 처리 사이 랜덤 대기(초). "빠르게 수십 명한테 연타"를 피하기 위한 최소/최대값.
 # 팔로우 직후 -> DM 사이의 짧은 대기와, 한 사람 처리 완료 후 다음 사람으로 넘어가기 전의
 # 긴 대기 두 군데에 쓰인다. 둘 다 매번 random.uniform 으로 다르게 뽑는다(고정 sleep 금지).
-DELAY_AFTER_FOLLOW_MIN = 4
-DELAY_AFTER_FOLLOW_MAX = 11
-DELAY_BETWEEN_PEOPLE_MIN = 35
-DELAY_BETWEEN_PEOPLE_MAX = 95
+DELAY_AFTER_FOLLOW_MIN = 2
+DELAY_AFTER_FOLLOW_MAX = 5
+# 오너 요청(2026-07-31)으로 사람 사이 대기를 10초 수준으로 낮춤. 고정 10초로 두면 기계처럼
+# 보이므로 10초를 중심으로 한 좁은 랜덤 범위를 유지한다(고정 sleep 금지 원칙).
+DELAY_BETWEEN_PEOPLE_MIN = 8
+DELAY_BETWEEN_PEOPLE_MAX = 13
 
 # 사람처럼 보이게: 메시지 입력 시 한 글자씩, 글자 사이 랜덤 지터(초)
 TYPE_JITTER_MIN = 0.03

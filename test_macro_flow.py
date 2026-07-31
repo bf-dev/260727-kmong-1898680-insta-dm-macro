@@ -98,6 +98,14 @@ class FakeDriver:
         self.sent_messages = {}  # username -> full typed text
         self._typed_buffer = []
         self._not_found_usernames = set()
+        # 2026-07-31: send_dm 이 이제 프로필의 [메시지] 버튼을 눌러 스레드를 연다(실측: 클릭해도
+        # URL 은 프로필 그대로 유지되고 채팅 위젯만 화면에 뜬다 - direct/t/ 로 이동하지 않음).
+        # 어떤 계정에 대해 위젯이 열렸는지 기억해서, contenteditable 조회 시 그 계정이면 입력창을
+        # 노출한다(실제 인스타 동작 재현).
+        self._message_widget_open_for = None
+        # 프로필의 [메시지] 버튼을 눌러 DM 창이 열린 상대. 실제 인스타와 같은 순서를 강제한다
+        # (2026-07-31: /direct/t/<id> 딥링크가 죽어서 프로필 -> [메시지] 경로로 바뀜).
+        self._dm_open_for = None
 
     # ---- 네비게이션 ----
     def get(self, url):
@@ -159,21 +167,27 @@ class FakeDriver:
             def _do_follow(u=username):
                 self.followed_usernames.append(u)
 
+            def _open_dm(u=username):
+                self._dm_open_for = u
+
+            buttons = [FakeElement(tag="button", text="메시지", on_click=_open_dm)]
             if already:
-                return [FakeElement(tag="button", text="Following")]
-            return [FakeElement(tag="button", text="Follow", on_click=_do_follow)]
+                buttons.insert(0, FakeElement(tag="button", text="Following"))
+            else:
+                buttons.insert(0, FakeElement(tag="button", text="Follow", on_click=_do_follow))
+            return buttons
 
         if by == By.XPATH and "contenteditable" in value:
-            if kind != "dm":
-                return []
-            if username in self._not_found_usernames:
+            # 딥링크로는 절대 안 열린다. 프로필에서 [메시지] 를 눌러야만 입력창이 뜬다.
+            target = self._dm_open_for
+            if target is None or target in self._not_found_usernames:
                 return []
             buf = []
 
-            def _record(ch):
+            def _record(ch, u=target):
                 buf.append(ch)
                 if ch == Keys.RETURN:
-                    self.sent_messages[username] = "".join(x for x in buf if x != Keys.RETURN)
+                    self.sent_messages[u] = "".join(x for x in buf if x != Keys.RETURN)
 
             return [FakeElement(tag="textarea", attrs={"aria-label": "Message"},
                                 on_send_keys=_record)]

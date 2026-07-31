@@ -27,9 +27,20 @@ FOLLOW_TEXTS = {"follow", "팔로우"}
 FOLLOWING_TEXTS = {"following", "팔로잉", "requested", "요청됨"}
 UNFOLLOW_HINT_TEXTS = {"message", "메시지", "메시지 보내기"}  # 이미 팔로우 중일 때 옆에 뜨는 버튼
 
+# 프로필 페이지의 [메시지] 버튼(= DM 스레드를 여는 정식 경로). 한국어/영어 UI 모두 대응.
+MESSAGE_BUTTON_TEXTS = {"message", "메시지", "메시지 보내기", "send message"}
+# 받은편지함의 [새로운 메시지](연필) 아이콘 svg aria-label.
+NEW_MESSAGE_LABELS = ("새로운 메시지", "New message")
+# 새 메시지 다이얼로그에서 상대를 고른 뒤 누르는 확인 버튼.
+CHAT_CONFIRM_TEXTS = {"채팅", "chat", "다음", "next"}
+
 # 셀렉터를 못 찾았다는 뜻의 detail 값들(= 인스타 DOM 변경 의심 신호). macro_engine 이 이걸 보고
 # 일반 실패와 구분해 'selector-miss' 진단을 따로 올린다.
-SELECTOR_MISS_DETAILS = {"follow_button_not_found", "message_box_not_found"}
+SELECTOR_MISS_DETAILS = {
+    "follow_button_not_found", "message_box_not_found",
+    "message_button_not_found", "new_message_button_not_found",
+    "dm_search_box_not_found", "dm_chat_button_not_found",
+}
 
 # 계정 제한/차단 화면의 문구(소문자 비교). 인스타는 이런 화면을 띄운 뒤에도 클릭 자체는
 # 계속 받아주기 때문에, 감지하지 않으면 매크로가 차단된 계정으로 계속 두드리게 된다.
@@ -302,16 +313,45 @@ def _find_message_box(driver):
     return None
 
 
-def send_dm(driver, username, message, log=print):
-    """direct/t/<username> 로 바로 이동해 메시지 입력창을 찾아 전송.
+def _wait_for_message_box(driver, timeout_s=None):
+    """메시지 입력창이 마운트될 때까지 폴링. 못 찾으면 None."""
+    deadline = time.time() + (timeout_s if timeout_s is not None else config.WAIT_TIMEOUT)
+    while time.time() < deadline:
+        box = _find_message_box(driver)
+        if box is not None:
+            return box
+        time.sleep(0.7)
+    return None
 
-    이 URL 은 팔로우 여부와 무관하게 해당 유저와의 DM 스레드(신규면 새 대화)를 바로 연다
-    (엔터프라이즈 새 메시지 검색 UI 를 안 타므로 더 안정적/덜 취약).
+
+def _click_text_button(driver, texts):
+    """버튼처럼 동작하는 요소 중 표시 텍스트가 texts 에 정확히 맞는 것을 클릭."""
+    for el in _find_buttonish(driver):
+        try:
+            t = (el.text or "").strip().lower()
+        except Exception:
+            continue
+        if t in texts:
+            try:
+                el.click()
+                return True
+            except Exception:
+                continue
+    return False
+
+
+def _open_thread_via_profile(driver, username, log=print):
+    """프로필 페이지의 [메시지] 버튼을 눌러 DM 스레드를 연다.
+
+    2026-07-31 실측: 예전에 쓰던 `/direct/t/<username>/` 딥링크는 더 이상 스레드를 열지 않는다
+    (DM 받은편지함만 뜨고 오른쪽 대화창이 비어 있음 - 고객 진단 ZIP 의 page.html 에
+    textarea/contenteditable 가 0개, GraphQL 1675012 오류 동반). 프로필의 실제 [메시지]
+    버튼은 인스타가 내부적으로 스레드를 생성/이동시켜 주므로 이 경로가 정상 동작한다.
     """
-    driver.get(f"{config.INSTAGRAM_BASE}/direct/t/{username}/")
+    driver.get(f"{config.INSTAGRAM_BASE}/{username}/")
     try:
         WebDriverWait(driver, config.WAIT_TIMEOUT).until(
-            lambda d: d.execute_script("return document.readyState") == "complete")
+            EC.presence_of_element_located((By.TAG_NAME, "header")))
     except Exception:
         pass
     time.sleep(random.uniform(config.DM_PAGE_LOAD_PAUSE_MIN, config.DM_PAGE_LOAD_PAUSE_MAX))
@@ -321,18 +361,120 @@ def send_dm(driver, username, message, log=print):
         page_text = driver.find_element(By.TAG_NAME, "body").text.lower()
     except Exception:
         pass
-    if "isn't available" in page_text or "사용할 수 없" in page_text:
-        return ActionResult(False, "dm_thread_not_available")
+    if "sorry, this page" in page_text or "페이지를 사용할 수 없" in page_text:
+        return None, "profile_not_found"
 
-    # 일부 계정은 "message request" 안내 화면에서 실제 입력창이 늦게 마운트된다. 폴링.
-    box = None
+    if not _click_text_button(driver, MESSAGE_BUTTON_TEXTS):
+        return None, "message_button_not_found"
+    log(f"프로필에서 [메시지] 클릭: @{username}")
+    box = _wait_for_message_box(driver)
+    return box, ("ok" if box is not None else "message_box_not_found")
+
+
+def _open_thread_via_new_message(driver, username, log=print):
+    """받은편지함의 [새로운 메시지] 아이콘 -> 검색 -> 상대 선택 -> [채팅] 으로 스레드를 연다.
+
+    프로필에 [메시지] 버튼이 안 보이는 경우(레이아웃 변형, 버튼이 '더 보기' 안으로 접힘 등)의
+    폴백 경로. 인스타 자체 UI 를 그대로 따라가므로 딥링크보다 깨질 확률이 낮다.
+    """
+    driver.get(f"{config.INSTAGRAM_BASE}/direct/inbox/")
+    try:
+        WebDriverWait(driver, config.WAIT_TIMEOUT).until(
+            lambda d: d.execute_script("return document.readyState") == "complete")
+    except Exception:
+        pass
+    time.sleep(random.uniform(config.DM_PAGE_LOAD_PAUSE_MIN, config.DM_PAGE_LOAD_PAUSE_MAX))
+
+    # [새로운 메시지](연필) 아이콘: svg 의 aria-label 로 찾고 클릭 가능한 조상을 누른다.
+    opened = False
+    for label in NEW_MESSAGE_LABELS:
+        try:
+            svgs = driver.find_elements(By.CSS_SELECTOR, f"svg[aria-label='{label}']")
+        except Exception:
+            svgs = []
+        for svg in svgs:
+            try:
+                target = svg.find_element(By.XPATH, "ancestor::*[self::button or @role='button'][1]")
+            except Exception:
+                target = svg
+            try:
+                target.click()
+                opened = True
+                break
+            except Exception:
+                continue
+        if opened:
+            break
+    if not opened:
+        return None, "new_message_button_not_found"
+
+    time.sleep(random.uniform(config.PRE_TYPE_PAUSE_MIN, config.PRE_TYPE_PAUSE_MAX))
+
+    # 검색창에 아이디 입력
+    search = None
     deadline = time.time() + config.WAIT_TIMEOUT
-    while time.time() < deadline and box is None:
-        box = _find_message_box(driver)
-        if box is None:
-            time.sleep(0.7)
+    while time.time() < deadline and search is None:
+        for el in driver.find_elements(By.CSS_SELECTOR, "input[type='text'], input[name='queryBox']"):
+            try:
+                if el.is_displayed():
+                    search = el
+                    break
+            except Exception:
+                continue
+        if search is None:
+            time.sleep(0.5)
+    if search is None:
+        return None, "dm_search_box_not_found"
+
+    _type_like_human(search, username)
+    time.sleep(random.uniform(1.2, 2.2))  # 검색 결과가 뜰 시간
+
+    # 결과 목록에서 정확히 이 아이디인 행을 고른다(부분 일치 계정 오발송 방지).
+    picked = False
+    deadline = time.time() + config.WAIT_TIMEOUT
+    while time.time() < deadline and not picked:
+        for el in driver.find_elements(By.XPATH, "//div[@role='button'] | //label | //li"):
+            try:
+                if not el.is_displayed():
+                    continue
+                lines = [ln.strip().lower() for ln in (el.text or "").split("\n") if ln.strip()]
+            except Exception:
+                continue
+            if username.lower() in lines:
+                try:
+                    el.click()
+                    picked = True
+                    break
+                except Exception:
+                    continue
+        if not picked:
+            time.sleep(0.6)
+    if not picked:
+        return None, "dm_user_not_found_in_search"
+
+    time.sleep(random.uniform(config.PRE_TYPE_PAUSE_MIN, config.PRE_TYPE_PAUSE_MAX))
+    if not _click_text_button(driver, CHAT_CONFIRM_TEXTS):
+        return None, "dm_chat_button_not_found"
+    log(f"새 메시지 검색으로 스레드 열기: @{username}")
+    box = _wait_for_message_box(driver)
+    return box, ("ok" if box is not None else "message_box_not_found")
+
+
+def send_dm(driver, username, message, log=print):
+    """해당 유저와의 DM 스레드를 열고 메시지를 전송한다.
+
+    경로 1) 프로필의 [메시지] 버튼 (기본)
+    경로 2) 받은편지함 [새로운 메시지] -> 검색 -> [채팅] (폴백)
+    두 경로 모두 인스타 실제 UI 클릭이라 딥링크처럼 조용히 죽지 않는다.
+    """
+    box, detail = _open_thread_via_profile(driver, username, log=log)
     if box is None:
-        return ActionResult(False, "message_box_not_found")
+        if detail == "profile_not_found":
+            return ActionResult(False, "profile_not_found")
+        log(f"프로필 경로 실패({detail}) - 새 메시지 검색으로 재시도: @{username}")
+        box, detail = _open_thread_via_new_message(driver, username, log=log)
+    if box is None:
+        return ActionResult(False, detail or "message_box_not_found")
 
     try:
         box.click()
