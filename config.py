@@ -9,7 +9,7 @@ import hashlib
 import os
 
 APP_NAME = "insta-dm-macro"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 CUSTOMER_ID = "1898680"
 
 INSTAGRAM_BASE = "https://www.instagram.com"
