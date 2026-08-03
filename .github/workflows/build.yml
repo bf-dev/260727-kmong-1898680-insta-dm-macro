@@ -59,6 +59,11 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python test_account_switch.py -v
 
+      - name: Unit test [시작] never blocks on account change (260803 uid-drift lockout)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python test_start_never_blocks.py -v
+
       - name: Real swap self-test on Windows (한글 경로 exe 를 실제로 교체 - 260731 stuck-on-1.3.1 bug)
         env:
           PYTHONIOENCODING: utf-8
@@ -142,7 +147,7 @@ jobs:
           # 고객은 zip 을 풀어 설치했다(안의 파일명이 한글). 자동 업데이트가 막힌 PC 에서는
           # 이 zip 을 그대로 다시 받아 덮어쓰면 되도록, 같은 포장으로 함께 배포한다.
           $zipVer = $ver -replace '\.', ''
-          $zip = "dist\insta-dm-macro-fix3-$zipVer.zip"
+          $zip = "dist\insta-dm-macro-fix4-$zipVer.zip"
           Compress-Archive -Path "dist\인스타DM매크로.exe" -DestinationPath $zip -Force
           gh release upload latest "dist\insta-dm-macro-$ver.exe" $zip "screenshots\gui_1898680.png" --clobber
           if ($LASTEXITCODE -ne 0) { gh release create latest "dist\insta-dm-macro-$ver.exe" $zip "screenshots\gui_1898680.png" --title latest --notes "auto build v$ver" }

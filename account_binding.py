@@ -47,6 +47,28 @@ def get(label):
     return entry if isinstance(entry, dict) else None
 
 
+def entries():
+    """{별명: {'user_id','username',...}} 전체. 별명 드롭다운(오타 방지)의 원본."""
+    return {k: v for k, v in _load_all().items() if isinstance(v, dict)}
+
+
+def labels():
+    """저장된 별명 목록(정렬)."""
+    return sorted(entries().keys(), key=lambda s: s.lower())
+
+
+def run_key(user_id, label=None):
+    """진행상황/하루 상한을 셀 때 쓰는 키.
+
+    별명이 아니라 **실제 계정의 숫자 id** 를 키로 쓴다. 고객이 같은 계정을 'mugenboksa' /
+    'megenboksa' 처럼 오타 낸 두 별명으로 돌려도 진행상황이 갈라지지 않고, 반대로 한 별명이
+    다른 계정을 가리키게 되면 남의 진행상황을 물려받지 않는다. id 를 못 읽으면 별명 폴백.
+    """
+    if user_id:
+        return f"acct:{user_id}"
+    return (label or "default").strip() or "default"
+
+
 def bind(label, user_id, username=None):
     """별명 <-> 계정 묶음을 저장(덮어쓰기). user_id 가 없으면 저장하지 않는다."""
     if not user_id:

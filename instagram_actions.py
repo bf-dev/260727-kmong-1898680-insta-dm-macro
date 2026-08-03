@@ -201,50 +201,88 @@ def goto_login_screen(driver):
     driver.get(config.INSTAGRAM_LOGIN_URL)
 
 
-def current_user_id(driver):
-    """지금 붙어 있는 인스타 계정의 **숫자 id**(ds_user_id 쿠키). 못 읽으면 None.
+# ---------------------------------------------------------------------------
+# 계정 동일성(누구로 실행 중인가) - v1.5.0 부터 **읽는 곳이 어디든 같은 함수 하나**만 쓴다.
+#
+# v1.4.0 사고: 로그인 직후에는 쿠키를 읽고([시작]) 직전에도 쿠키를 읽었는데, 그 사이에 고객이
+# 크롬 창에서 인스타 자체 '계정 전환'으로 계정을 바꾸면 값이 달라진다. v1.4.0 은 그걸
+# '변조'로 보고 [시작] 을 막아버렸다(고객 실측: start_blocked_uid_drift 3회 반복, 사용 불가).
+# 실제로는 고객이 의도한 정상 동작이다. 그래서 v1.5.0 의 원칙은 딱 하나:
+#
+#   **팔로우/DM 이 실제로 실행되는 그 계정**이 유일한 정답이고, 프로그램은 그 계정을 따라간다.
+#
+# 그 '실행 계정'을 가장 정확하게 알려주는 건 페이지 컨텍스트에서 쿠키를 그대로 실어 보내는
+# 인증 API 응답이다(팔로우/DM XHR 과 동일한 자격증명으로 나가므로 정의상 같은 계정).
+#   GET /api/v1/accounts/current_user/  (헤더 X-IG-App-ID)  -> {"user":{"pk":..,"username":..}}
+# 미로그인 상태에서 이 엔드포인트는 302 -> /accounts/login 으로 튄다(2026-08-03 실측).
+IG_WEB_APP_ID = "936619743392459"
 
-    계정 동일성 판정의 유일한 정답. 화면(DOM)에서 아이디를 긁는 방식은 피드 글쓴이/추천 계정을
-    잘못 집을 수 있지만, `ds_user_id` 쿠키는 인스타가 로그인 세션에 직접 심어 주는 값이라
-    피드 내용과 무관하다. '별명은 B 인데 세션은 A' 같은 사고를 이 값으로 잡는다.
-    """
-    try:
-        for c in driver.get_cookies():
-            if c.get("name") == "ds_user_id" and c.get("value"):
-                return str(c["value"])
-    except Exception:
-        pass
-    return None
-
+_CURRENT_USER_JS = """
+var done = arguments[arguments.length - 1];
+try {
+  fetch('/api/v1/accounts/current_user/?edit=true', {
+    method: 'GET', credentials: 'include', redirect: 'follow',
+    headers: {'X-IG-App-ID': '%s', 'X-Requested-With': 'XMLHttpRequest'}
+  }).then(function (r) {
+    if (r.redirected || !r.ok) { done({error: 'http_' + r.status + (r.redirected ? '_redirected' : '')}); return null; }
+    return r.json().then(function (j) {
+      var u = (j && j.user) || {};
+      done({id: (u.pk !== undefined && u.pk !== null) ? String(u.pk) : (u.pk_id ? String(u.pk_id) : null),
+            username: u.username || null});
+    });
+  }).catch(function (e) { done({error: String(e)}); });
+} catch (e) { done({error: String(e)}); }
+""" % IG_WEB_APP_ID
 
 # 인스타 웹이 문서에 심어 두는 '지금 로그인한 사용자' 블록. 실측(진단 ZIP):
 #   "PolarisViewer",[],{"data":{... "id":"45010010845", ... "username":"xxtwinklebeamxx" ...}}
-_VIEWER_USERNAME_JS = (
+_VIEWER_IDENTITY_JS = (
     "var h=document.documentElement.innerHTML;"
     "var i=h.indexOf('PolarisViewer');"
     "if(i<0){return null;}"
     "var seg=h.slice(i,i+8000);"
-    "var m=seg.match(/\"username\":\"([A-Za-z0-9._]{1,30})\"/);"
-    "return m?m[1]:null;"
+    "var u=seg.match(/\"username\":\"([A-Za-z0-9._]{1,30})\"/);"
+    "var d=seg.match(/\"id\":\"([0-9]{5,25})\"/);"
+    "if(!u&&!d){return null;}"
+    "return {id: d?d[1]:null, username: u?u[1]:null};"
 )
 
+_VIEWER_USERNAME_JS = _VIEWER_IDENTITY_JS  # 이름만 유지(예전 호출부/테스트 호환)
 
-def current_username(driver):
-    """지금 로그인된 인스타 아이디를 읽는다(못 읽으면 None). 페이지 이동은 하지 않는다.
 
-    v1.3.x 는 문서 전체에서 **첫 번째** `"username":"..."` 를 집었다. 프로필 페이지에서는
-    우연히 로그인 사용자가 먼저 나와 맞았지만, 홈 피드에서는 피드 글쓴이/추천 계정이 먼저
-    나올 수 있어서 진단 로그의 `user=` 자체를 믿을 수 없었다(고객 로그의
-    `login_reused account=mightyjimin user=mightysun_09` 가 이 방식으로 찍힌 값이다).
-    이제 '로그인 사용자' 전용 블록(PolarisViewer) -> 좌측 내비의 내 프로필 링크 순으로 읽고,
-    둘 다 실패할 때만 예전 방식으로 폴백한다.
-    """
+def _on_instagram_page(driver):
     try:
-        name = driver.execute_script(_VIEWER_USERNAME_JS)
-        if name:
-            return name
+        return "instagram.com" in (driver.current_url or "")
+    except Exception:
+        return False
+
+
+def _identity_from_api(driver):
+    """실행 계정의 정답 소스. 페이지 컨텍스트에서 인증 API 를 그대로 호출한다."""
+    if not _on_instagram_page(driver):
+        return None
+    try:
+        driver.set_script_timeout(12)
     except Exception:
         pass
+    res = driver.execute_async_script(_CURRENT_USER_JS)
+    if not isinstance(res, dict) or res.get("error"):
+        return None
+    if not res.get("id"):
+        return None
+    return {"user_id": str(res["id"]), "username": res.get("username") or None, "source": "api"}
+
+
+def _identity_from_viewer(driver):
+    """서버가 문서에 그려 넣은 viewer 블록. API 가 막혔을 때의 2순위."""
+    res = driver.execute_script(_VIEWER_IDENTITY_JS)
+    if not isinstance(res, dict) or not res.get("id"):
+        return None
+    return {"user_id": str(res["id"]), "username": res.get("username") or None, "source": "viewer"}
+
+
+def _username_from_dom(driver):
+    """좌측 내비의 내 프로필 링크(alt='<아이디>님의 프로필 사진')에서 아이디만 읽는다."""
     try:
         for a in driver.find_elements(By.CSS_SELECTOR, "a[href^='/'][role='link']"):
             href = (a.get_attribute("href") or "").rstrip("/")
@@ -253,25 +291,242 @@ def current_username(driver):
                 continue
             for img in a.find_elements(By.CSS_SELECTOR, "img[alt]"):
                 alt = img.get_attribute("alt") or ""
-                # 내 프로필 사진의 alt 는 "<아이디>님의 프로필 사진" / "<id>'s profile picture".
                 if slug in alt and ("프로필" in alt or "profile" in alt.lower()):
                     return slug
-    except Exception:
-        pass
-    try:
-        name = driver.execute_script(
-            "var m=document.documentElement.innerHTML.match("
-            "/\"username\"\\s*:\\s*\"([A-Za-z0-9._]{1,30})\"/); return m ? m[1] : null;")
-        if name:
-            return name
     except Exception:
         pass
     return None
 
 
+def _identity_from_cookie(driver):
+    """`ds_user_id` 쿠키. 3순위 - 멀티 계정 세션에서는 활성 계정과 어긋날 수 있다."""
+    uid = None
+    for c in driver.get_cookies() or []:
+        if c.get("name") == "ds_user_id" and c.get("value"):
+            uid = str(c["value"])
+            break
+    if not uid:
+        return None
+    return {"user_id": uid, "username": _username_from_dom(driver), "source": "cookie"}
+
+
+def resolve_identity(driver):
+    """**지금 이 크롬 세션이 어느 계정으로 동작 중인가**. 로그인/[시작]/진단 전부 이 함수만 쓴다.
+
+    반환: {"user_id": str|None, "username": str|None, "source": "api"|"viewer"|"cookie"|"none"}
+    페이지 이동은 하지 않는다(실행 중 호출해도 안전).
+    """
+    for fn in (_identity_from_api, _identity_from_viewer, _identity_from_cookie):
+        try:
+            ident = fn(driver)
+        except Exception:
+            ident = None
+        if ident and ident.get("user_id"):
+            return ident
+    # id 는 못 읽었지만 아이디만이라도 나오면 그거라도 돌려준다(진단 가치).
+    try:
+        name = _username_from_dom(driver)
+    except Exception:
+        name = None
+    return {"user_id": None, "username": name, "source": "none"}
+
+
+def identity_report(driver):
+    """세 소스(api / viewer / cookie)를 **전부** 읽어 한 줄로 만든다. 진단 전용.
+
+    v1.4.0 사고를 두고 '읽는 위치마다 다른 소스를 봐서 값이 갈렸다'는 가설이 있었다. 이걸
+    추측으로 남기지 않기 위해, [시작] 때 세 소스를 동시에 찍는다. 다음 실행 로그 한 줄이면
+    세 값이 실제로 일치하는지(=고객이 크롬에서 계정을 바꾼 것) 아닌지가 바로 판정된다.
+    """
+    out = []
+    for name, fn in (("api", _identity_from_api), ("viewer", _identity_from_viewer),
+                     ("cookie", _identity_from_cookie)):
+        try:
+            got = fn(driver)
+        except Exception as e:
+            out.append(f"{name}=err({str(e)[:60]})")
+            continue
+        if not got:
+            out.append(f"{name}=none")
+        else:
+            out.append(f"{name}={got.get('user_id')}/{got.get('username') or '?'}")
+    return " ".join(out)
+
+
+def identity_str(ident):
+    """로그 한 줄용 표기: `@아이디(숫자id, src=api)`."""
+    ident = ident or {}
+    return (f"@{ident.get('username') or '?'}"
+            f"({ident.get('user_id') or '?'}, src={ident.get('source') or 'none'})")
+
+
+def current_user_id(driver):
+    """실행 계정의 숫자 id. `resolve_identity` 의 얇은 래퍼(소스가 갈라지지 않게)."""
+    return resolve_identity(driver).get("user_id")
+
+
+def current_username(driver):
+    """실행 계정의 아이디. `resolve_identity` 의 얇은 래퍼."""
+    return resolve_identity(driver).get("username")
+
+
 def current_identity(driver):
-    """(숫자 id, 아이디) 튜플. 계정 바인딩 검증에 쓴다."""
-    return current_user_id(driver), current_username(driver)
+    """(숫자 id, 아이디) 튜플. 한 번만 읽어서 두 값이 서로 다른 시점의 값이 되지 않게 한다."""
+    ident = resolve_identity(driver)
+    return ident.get("user_id"), ident.get("username")
+
+
+# ---------------------------------------------------------------------------
+# 인스타 자체 '계정 전환'(프로필 메뉴 -> 계정 전환) 조작 - 연결된 서브계정 대응
+#
+# 이 고객은 부모 계정 하나에 서브계정이 여러 개 붙어 있다("A아이디 한가지로 3가지 계정을
+# 만들 수 있는데"). 크롬 프로필을 나눠도 부모로 로그인하면 그 세션에 서브계정이 전부 딸려
+# 오므로, 원하는 계정으로 '활성'을 바꾸는 건 인스타 자체 전환 UI 를 쓰는 수밖에 없다.
+#
+# 주의(정직하게): 아래 셀렉터는 텍스트/aria-label 기반으로 최대한 느슨하게 짰지만
+# **라이브 인스타 계정으로 실측 검증하지 못했다**(이 인프라에서 인스타 로그인이 계속 거부됨).
+# 그래서 실패해도 앱을 막지 않고, 실패 시 화면 DOM 을 진단으로 올려 다음 판에 셀렉터를
+# 확정할 수 있게 한다. 전환 성공 판정은 오직 `resolve_identity` 로만 한다.
+_SWITCH_MENU_TEXTS = ("계정 전환", "계정 전환하기", "Switch accounts", "Switch account")
+_MORE_MENU_LABELS = ("더 보기", "More", "설정", "Settings", "옵션", "Options")
+_CLICKABLE_XPATH_ROLES = "self::button or @role='button' or @role='menuitem' or @role='link'"
+
+
+def _clickable_by_text(driver, texts, scope=None):
+    """텍스트가 들어간 가장 '작은'(=가장 안쪽) 클릭 요소를 고른다."""
+    best = None
+    best_len = None
+    for t in texts:
+        xp = f".//*[{_CLICKABLE_XPATH_ROLES}][contains(normalize-space(.), '{t}')]"
+        try:
+            els = (scope or driver).find_elements(By.XPATH, xp)
+        except Exception:
+            els = []
+        for el in els:
+            try:
+                if not el.is_displayed():
+                    continue
+                length = len((el.text or "").strip())
+            except Exception:
+                continue
+            if best is None or length < best_len:
+                best, best_len = el, length
+    return best
+
+
+def _click(driver, el):
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+    except Exception:
+        pass
+    try:
+        el.click()
+        return True
+    except Exception:
+        pass
+    try:
+        driver.execute_script("arguments[0].click();", el)
+        return True
+    except Exception:
+        return False
+
+
+def _open_more_menu(driver):
+    for label in _MORE_MENU_LABELS:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, f"svg[aria-label='{label}']")
+        except Exception:
+            els = []
+        for svg in els:
+            try:
+                holder = svg.find_element(By.XPATH,
+                                          "./ancestor::*[self::button or @role='button' or @role='link'][1]")
+            except Exception:
+                continue
+            if _click(driver, holder):
+                time.sleep(1.0)
+                return True
+    return False
+
+
+def list_switchable_accounts(driver):
+    """계정 전환 대화상자에 보이는 아이디 목록(열려 있지 않으면 빈 목록)."""
+    names = []
+    try:
+        rows = driver.find_elements(
+            By.XPATH, "//div[@role='dialog']//*[string-length(normalize-space(text()))>0]")
+    except Exception:
+        rows = []
+    for el in rows:
+        try:
+            t = (el.text or "").strip()
+        except Exception:
+            continue
+        if t and len(t) <= 30 and all(ch.isalnum() or ch in "._" for ch in t) and t not in names:
+            names.append(t)
+    return names
+
+
+def switch_to_account(driver, target_username, log=print):
+    """인스타 자체 계정 전환으로 `target_username` 을 활성 계정으로 만든다.
+
+    반환: (성공여부, 설명). **성공 판정은 전환 후 `resolve_identity` 결과로만 한다**
+    (메뉴를 눌렀다는 사실만으로 성공이라고 하지 않는다).
+    """
+    if not target_username:
+        return False, "대상 아이디가 없습니다"
+    steps = []
+    try:
+        cur = resolve_identity(driver)
+        if (cur.get("username") or "").lower() == target_username.lower():
+            return True, f"이미 @{target_username} 로 동작 중"
+        try:
+            driver.get(config.INSTAGRAM_BASE + "/")
+            time.sleep(2.0)
+        except Exception:
+            pass
+
+        el = _clickable_by_text(driver, _SWITCH_MENU_TEXTS)
+        steps.append(f"direct_menu={'found' if el else 'none'}")
+        if el is None:
+            steps.append(f"more_menu={'opened' if _open_more_menu(driver) else 'failed'}")
+            el = _clickable_by_text(driver, _SWITCH_MENU_TEXTS)
+            steps.append(f"menu_after_more={'found' if el else 'none'}")
+        if el is None:
+            return False, "계정 전환 메뉴를 찾지 못했습니다 (" + ", ".join(steps) + ")"
+        _click(driver, el)
+        time.sleep(1.5)
+
+        seen = list_switchable_accounts(driver)
+        steps.append("dialog_accounts=" + (",".join(seen) if seen else "none"))
+        target = None
+        try:
+            target = driver.find_element(
+                By.XPATH,
+                f"//div[@role='dialog']//*[normalize-space(text())='{target_username}']")
+        except Exception:
+            target = None
+        if target is None:
+            target = _clickable_by_text(driver, (target_username,))
+        if target is None:
+            return False, f"목록에서 @{target_username} 를 찾지 못했습니다 (" + ", ".join(steps) + ")"
+        try:
+            holder = target.find_element(
+                By.XPATH, f"./ancestor-or-self::*[{_CLICKABLE_XPATH_ROLES}][1]")
+        except Exception:
+            holder = target
+        _click(driver, holder)
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            time.sleep(2.0)
+            now = resolve_identity(driver)
+            if (now.get("username") or "").lower() == target_username.lower():
+                return True, f"전환 완료 {identity_str(now)}"
+        return False, ("전환 후에도 계정이 바뀌지 않았습니다 "
+                       f"{identity_str(resolve_identity(driver))} (" + ", ".join(steps) + ")")
+    except Exception as e:
+        return False, f"계정 전환 중 오류: {e} (" + ", ".join(steps) + ")"
 
 
 def clear_session(driver):

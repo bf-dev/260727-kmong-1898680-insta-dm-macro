@@ -72,6 +72,31 @@ def reset(excel_path, account_label):
         pass
 
 
+def migrate(excel_path, old_label, new_label):
+    """v1.5.0: 진행상황 키를 '별명' -> '실제 계정 id' 로 옮길 때 쓰는 1회성 승계.
+
+    승계를 안 하면 이미 DM 을 보낸 사람에게 **한 번 더 보내는 사고**가 난다. 대상 키에 이미
+    기록이 있으면 건드리지 않고(=덮어쓰지 않고), 없을 때만 예전 별명 기록을 복사한다.
+    반환: 실제로 복사했으면 True.
+    """
+    if not old_label or not new_label or old_label == new_label:
+        return False
+    src = _path_for(_key_for(excel_path, old_label))
+    dst = _path_for(_key_for(excel_path, new_label))
+    if os.path.exists(dst) or not os.path.exists(src):
+        return False
+    try:
+        with open(src, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["account_label"] = new_label
+        data["migrated_from"] = old_label
+        with open(dst, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
+
+
 # ---------------- 하루 처리량 카운터 (v1.1) ----------------
 # 엑셀 파일이 아니라 '인스타 계정' 기준으로 센다. 같은 계정으로 엑셀을 바꿔 돌려도 하루
 # 총량은 합산돼야 계정 보호가 된다. 날짜는 사용자 로컬 날짜(고객이 체감하는 '오늘').
@@ -121,6 +146,24 @@ def bump_daily_count(account_label, n=1):
     except Exception:
         pass
     return new_value
+
+
+def migrate_daily(old_label, new_label):
+    """하루 처리량 카운터도 같은 이유로 승계한다(상한이 초기화돼 계정이 위험해지지 않게)."""
+    if not old_label or not new_label or old_label == new_label:
+        return False
+    src, dst = _daily_path(old_label), _daily_path(new_label)
+    if os.path.exists(dst) or not os.path.exists(src):
+        return False
+    try:
+        with open(src, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["account_label"] = new_label
+        with open(dst, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
 
 
 def reset_daily_count(account_label):
