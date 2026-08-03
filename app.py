@@ -37,6 +37,10 @@ class App:
         self.session = None         # 실행에 넘기는 세션(api=ApiSession, browser=드라이버)
         self.actions = None         # ig_api 또는 instagram_actions
         self.engine = None
+        # 지금 붙어 있는 세션이 '어느 별명 / 어느 인스타 계정'인지. 별명 칸만 바꾸고 [시작] 을
+        # 누르는 실수(=이전 계정으로 계속 도는 사고)를 여기서 잡는다.
+        self.session_label = None
+        self.session_user_id = None
         self.rows = []
         self.skipped_no_message = []
         self.logged_in = False
@@ -185,6 +189,13 @@ class App:
         self.session = None
         self.actions = None
         self.logged_in = False
+        self.session_label = None
+        self.session_user_id = None
+        try:
+            import account_binding
+            account_binding.unbind(label)
+        except Exception:
+            pass
         profile_dir = config.profile_dir_for(label)
         try:
             shutil.rmtree(profile_dir, ignore_errors=True)
@@ -222,6 +233,8 @@ class App:
         self.session = session
         self.actions = ig_api
         self.logged_in = True
+        self.session_label = label
+        self.session_user_id = None
         self.password_var.set("")  # 화면에도 비밀번호를 남기지 않는다
         who = ig_api.account_username(session)
         self._log(f"'{label}' 접속 완료{f' (@{who})' if who else ''}.")
@@ -263,24 +276,53 @@ class App:
             self._set_status("상태: 브라우저 시작 실패")
             return
 
+        import account_binding
         import instagram_actions as ig
         if ig.is_logged_in(self.driver):
+            # 이미 로그인된 프로필이라도 **그 세션이 정말 이 별명의 계정인지** 확인한다.
+            # (고객이 세 번 리포트한 '계정 전환이 안 됨' 의 자동 방어선. 별명별 프로필 분리만
+            #  믿고 넘어가면, 이전 계정 세션을 그대로 물려받아도 아무도 못 알아챈다.)
+            uid, who = ig.current_identity(self.driver)
+            verdict, detail = account_binding.check(label, uid, who)
+            bridge.remote_log("login_identity",
+                              f"account={label} user={who} uid={uid} verdict={verdict}",
+                              force=True)
+            if verdict == "mismatch":
+                self._log(f"[계정 전환] {detail}")
+                self._log("이전 계정 세션을 정리하고 새 로그인 화면을 띄웁니다...")
+                bridge.remote_log("login_mismatch_relogin",
+                                  f"account={label} live_uid={uid} live_user={who}", force=True)
+                account_binding.unbind(label)
+                ig.clear_session(self.driver)
+                self._wait_manual_login(label, ig, account_binding)
+                return
+            if verdict == "unknown":
+                # 세션 id 를 못 읽었다 = 사실상 로그인 상태가 아니다. 새로 로그인 받는다.
+                self._log("로그인 상태를 확인하지 못했습니다. 새로 로그인해 주세요.")
+                self._wait_manual_login(label, ig, account_binding)
+                return
+
             # 여기서 session/actions 를 안 채우면 이전 별명의 (이미 종료된) 드라이버가 그대로
             # 남아 매크로가 옛 계정/죽은 창으로 돌아간다 - 계정 전환이 안 되는 것처럼 보인다.
             self.session = self.driver
             self.actions = ig
             self.logged_in = True
-            who = ig.current_username(self.driver)
+            self.session_label = label
+            self.session_user_id = uid
             self._log(f"'{label}' 프로필에 이미 로그인되어 있습니다"
                       f"{f' (@{who})' if who else ''}. 다른 계정으로 바꾸시려면 "
-                      f"[다른 계정으로 로그인]을 눌러주세요.")
+                      f"별명을 바꾸고 [로그인 / 계정 전환]을 눌러주세요.")
             self._set_status(f"상태: 로그인됨 ({label}{f' / @{who}' if who else ''})")
-            bridge.remote_log("login_reused", f"account={label} user={who}", force=True)
+            bridge.remote_log("login_reused", f"account={label} user={who} uid={uid}", force=True)
             return
 
         ig.goto_login_screen(self.driver)
+        self._wait_manual_login(label, ig, account_binding)
+
+    def _wait_manual_login(self, label, ig, account_binding):
+        """크롬 창에서 사람이 직접 로그인할 때까지 기다리고, 성공하면 별명에 계정을 묶는다."""
         self._log("크롬 창에서 인스타그램 아이디/비밀번호를 직접 입력해 로그인해 주세요. "
-                   "(자동입력 안 함 - 2단계 인증/보안 확인도 그대로 통과 가능)")
+                  "(자동입력 안 함 - 2단계 인증/보안 확인도 그대로 통과 가능)")
         self._set_status("상태: 로그인 대기 중 (창에서 직접 로그인)")
         ok = ig.wait_for_manual_login(
             self.driver, timeout_s=600,
@@ -289,10 +331,14 @@ class App:
             self.logged_in = True
             self.session = self.driver
             self.actions = ig
-            who = ig.current_username(self.driver)
+            self.session_label = label
+            uid, who = ig.current_identity(self.driver)
+            self.session_user_id = uid
+            # 이 별명은 지금 로그인한 계정으로 (다시) 묶는다. 다음 실행부터 이 값으로 대조한다.
+            account_binding.bind(label, uid, who)
             self._log(f"'{label}' 로그인 확인됨{f' (@{who})' if who else ''}.")
             self._set_status(f"상태: 로그인됨 ({label}{f' / @{who}' if who else ''})")
-            bridge.remote_log("login_ok", f"account={label} user={who}", force=True)
+            bridge.remote_log("login_ok", f"account={label} user={who} uid={uid}", force=True)
         else:
             self._log("로그인 대기 시간이 초과됐습니다. 다시 시도해 주세요.")
             self._set_status("상태: 로그인 대기 시간 초과")
@@ -311,6 +357,8 @@ class App:
             self._log(f"로그아웃 처리 중 오류: {e}")
         self.logged_in = False
         self.session = None
+        self.session_label = None
+        self.session_user_id = None
         self._set_status("상태: 로그아웃됨")
         bridge.remote_log("logout", f"account={self.account_var.get().strip()}", force=True)
 
@@ -350,6 +398,8 @@ class App:
             return
         import macro_engine
         label = self.account_var.get().strip() or "default"
+        if not self._session_matches_label(label):
+            return
         self.engine = macro_engine.MacroEngine(
             self.session, self.rows, self.excel_var.get().strip(), label,
             log_cb=self._log, done_cb=self._on_row_done,
@@ -357,6 +407,48 @@ class App:
             actions=self.actions)
         self.engine.start()
         self._log("매크로를 시작합니다.")
+
+    def _session_matches_label(self, label):
+        """[시작] 직전 안전장치: 지금 열려 있는 세션이 화면의 별명과 같은 계정인지 확인한다.
+
+        고객이 별명 칸만 바꾸고 [로그인 / 계정 전환] 없이 바로 [시작] 을 누르면, 예전 버전은
+        **이전 계정으로 그대로 돌았다**(진행상황만 새 별명으로 기록되니 겉으로는 전환된 것처럼
+        보인다). 여기서 막고 다시 로그인하게 한다.
+        """
+        prev_label = getattr(self, "session_label", None)
+        if prev_label is not None and prev_label != label:
+            messagebox.showerror(
+                "계정 확인 필요",
+                f"지금 로그인된 계정은 '{prev_label}' 입니다.\n"
+                f"'{label}' 로 진행하시려면 [로그인 / 계정 전환] 을 먼저 눌러주세요.")
+            bridge.remote_log("start_blocked_label_mismatch",
+                              f"session_label={prev_label} start_label={label}", force=True)
+            return False
+        if self.engine_var.get() != "api":
+            try:
+                import account_binding
+                import instagram_actions as ig
+                uid = ig.current_user_id(self.session)
+            except Exception:
+                return True
+            if uid and getattr(self, "session_user_id", None) and uid != self.session_user_id:
+                messagebox.showerror(
+                    "계정 확인 필요",
+                    "크롬 창의 로그인 계정이 시작할 때와 달라졌습니다.\n"
+                    "[로그인 / 계정 전환] 을 다시 눌러 확인해 주세요.")
+                bridge.remote_log("start_blocked_uid_drift",
+                                  f"account={label} was={self.session_user_id} now={uid}",
+                                  force=True)
+                return False
+            if uid:
+                verdict, detail = account_binding.check(label, uid)
+                if verdict == "mismatch":
+                    messagebox.showerror("계정 확인 필요",
+                                         f"{detail}\n\n[로그인 / 계정 전환] 을 먼저 눌러주세요.")
+                    bridge.remote_log("start_blocked_binding_mismatch",
+                                      f"account={label} uid={uid}", force=True)
+                    return False
+        return True
 
     def _on_halt(self, reason, message):
         """엔진이 스스로 멈췄을 때: 로그만으로는 놓치기 쉬우니 팝업으로 확실히 알린다."""
@@ -447,6 +539,24 @@ def _run_guidemo(root, app):
         app._log(f"[데모] 다음 사람까지 랜덤 대기 {gap_s:.1f}초 (계정 보호)")
     app.stats_var.set(f"완료 {len(rows)} / 팔로우 {followed} / DM {dm_sent} / 실패 0")
     app._log(f"[데모] 완료: F열 없어 스킵 {len(skipped)}행")
+
+    # v1.4.0 에서 고친 3가지가 실제로 동작하는지 이 창에서 그대로 실행해 보여준다(CI 스크린샷 증거).
+    try:
+        import account_binding
+        import instagram_actions as ig
+        import updater
+        app._log("[v1.4.0 확인] 팔로우 버튼 판정: "
+                 f"'맞팔로우'->{ig.classify_follow_text('맞팔로우')}, "
+                 f"'팔로잉'->{ig.classify_follow_text('팔로잉')}, "
+                 f"'팔로우 취소'->{ig.classify_follow_text('팔로우 취소')}")
+        verdict, _ = account_binding.check("__demo__", "999999", "demo_user")
+        verdict2, detail2 = account_binding.check("__demo2__", "999999", "demo_user")
+        account_binding.unbind("__demo__")
+        app._log(f"[v1.4.0 확인] 계정 바인딩: 최초 로그인->{verdict}, "
+                 f"다른 별명이 같은 세션을 물려받으면->{verdict2} (자동 재로그인)")
+        app._log(f"[v1.4.0 확인] 자동 업데이트 대상 경로(sys.executable): {updater.target_exe_path()}")
+    except Exception as e:
+        app._log(f"[v1.4.0 확인] 실행 중 오류: {e}")
 
     hold_ms = int(os.environ.get("DIAG_HOLD_MS", "6000"))
     root.lift()

@@ -143,7 +143,9 @@ class MacroEngine(threading.Thread):
                 continue  # 완료 표시 안 함 -> 다음 실행에 재시도
 
             if follow_result.ok:
-                if follow_result.detail == "followed":
+                # already_following 은 '이미 팔로우 중' 이라 새로 센 팔로우가 아니다.
+                # followed_unverified 는 클릭은 들어갔지만 버튼 상태 확인을 못 한 경우 - 센다.
+                if follow_result.detail in ("followed", "followed_unverified"):
                     self.stats["followed"] += 1
                 self._log(f"[{row.row_no}행] 팔로우 결과: {follow_result.detail}")
             else:

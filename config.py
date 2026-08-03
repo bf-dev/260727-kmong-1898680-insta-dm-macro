@@ -9,7 +9,7 @@ import hashlib
 import os
 
 APP_NAME = "insta-dm-macro"
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.4.0"
 CUSTOMER_ID = "1898680"
 
 INSTAGRAM_BASE = "https://www.instagram.com"
@@ -81,6 +81,9 @@ STATIC_BASE = f"https://works.insu.ng/works/public/{CUSTOMER_ID}"
 # 자동 업데이트
 VERSION_URL = f"{STATIC_BASE}/version-{APP_NAME}.json"
 UPDATE_CHECK_SECONDS = 300
+# 자동 교체가 막힌 PC 에서 고객에게 보여줄 수동 다운로드 주소(zip 안에 실행파일 1개).
+# 버전 json 의 exeUrl 을 읽을 수 있으면 그걸 우선 안내하고, 못 읽을 때만 이 주소를 쓴다.
+MANUAL_DOWNLOAD_URL = f"{STATIC_BASE}/insta-dm-macro-fix3-140.zip"
 
 # 프로그램 전용 크롬(Chrome for Testing) / 계정별 프로필 / 설정·진행상황 저장 위치
 _HOME = os.path.expanduser("~")
@@ -88,6 +91,8 @@ CHROME_CACHE_DIR = os.path.join(_HOME, ".insta_dm_macro", "chrome")
 CHROME_PROFILE_ROOT = os.path.join(_HOME, ".insta_dm_macro", "profiles")
 APP_DIR = os.path.join(os.getenv("APPDATA", _HOME), "InstaDmMacro")
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
+# 계정 별명 -> 실제 인스타 계정(숫자 id + 아이디) 매핑. '계정 전환이 안 되는' 사고를 막는 핵심.
+ACCOUNT_BINDINGS_FILE = os.path.join(APP_DIR, "account_bindings.json")
 PROGRESS_DIR = os.path.join(APP_DIR, "progress")
 
 

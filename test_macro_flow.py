@@ -61,8 +61,12 @@ import progress_store
 
 class FakeElement:
     def __init__(self, tag="div", text="", attrs=None, on_click=None, on_send_keys=None,
-                 displayed=True, enabled=True):
+                 displayed=True, enabled=True, scope_lookup=None):
         self.tag = tag
+        # 실제 인스타에서 팔로우/메시지 버튼은 <header> 안에 있고, v1.4.0 부터 코드가 헤더로
+        # 범위를 좁혀서 찾는다(페이지 아래 '비슷한 계정' 추천의 팔로우 버튼을 안 건드리려고).
+        # fake 도 같은 구조여야 한다: 헤더 요소에 하위 조회를 붙여 준다.
+        self._scope_lookup = scope_lookup
         self.text = text
         self.attrs = attrs or {}
         self._on_click = on_click
@@ -87,6 +91,11 @@ class FakeElement:
 
     def is_enabled(self):
         return self._enabled
+
+    def find_elements(self, by, value):
+        if self._scope_lookup is None:
+            return []
+        return self._scope_lookup(by, value)
 
 
 class FakeDriver:
@@ -141,6 +150,12 @@ class FakeDriver:
         return None
 
     # ---- DOM 조회 ----
+    def _header_lookup(self, by, value):
+        """<header> 안에서의 하위 조회. 프로필 버튼들은 전부 헤더 안에 있다."""
+        if by == By.XPATH and "button" in value:
+            return self.find_elements(By.XPATH, "//button | //div[@role='button']")
+        return []
+
     def find_element(self, by, value):
         els = self.find_elements(by, value)
         if not els:
@@ -152,7 +167,9 @@ class FakeDriver:
         username = self._current_username()
 
         if by == By.TAG_NAME and value == "header":
-            return [FakeElement(tag="header")] if kind == "profile" else []
+            if kind != "profile":
+                return []
+            return [FakeElement(tag="header", scope_lookup=self._header_lookup)]
 
         if by == By.TAG_NAME and value == "body":
             return [FakeElement(tag="body", text="")]

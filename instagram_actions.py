@@ -24,9 +24,64 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 import config
 
-FOLLOW_TEXTS = {"follow", "팔로우"}
-FOLLOWING_TEXTS = {"following", "팔로잉", "requested", "요청됨"}
+FOLLOW_TEXTS = {
+    "follow", "팔로우",
+    # 2026-07-31 고객 진단 ZIP 실측: 상대가 나를 이미 팔로우 중이면 인스타는 버튼 문구를
+    # "팔로우"가 아니라 **"맞팔로우"**(=Follow back)로 바꿔 그린다. v1.3.x 는 정확히 일치하는
+    # 문자열만 봤기 때문에 이 버튼을 못 찾고 follow_button_not_found 로 실패했다.
+    # (`<button type="button">맞팔로우</button>` - 6개 진단 ZIP 전부 동일)
+    "맞팔로우", "맞팔로우하기", "follow back", "follow back?",
+    "팔로우하기", "다시 팔로우", "follow again",
+}
+FOLLOWING_TEXTS = {
+    "following", "팔로잉", "requested", "요청됨", "요청 됨", "요청 취소",
+    "request sent", "cancel request", "팔로우 취소", "unfollow",
+}
 UNFOLLOW_HINT_TEXTS = {"message", "메시지", "메시지 보내기"}  # 이미 팔로우 중일 때 옆에 뜨는 버튼
+
+# 텍스트가 위 목록에 정확히 없을 때 쓰는 보수적 판정용. 인스타는 문구를 자주 바꾸므로
+# "팔로우/follow 가 들어가되 팔로잉/팔로워/취소가 아닌 짧은 버튼"까지는 팔로우 버튼으로 본다.
+_FOLLOW_NEGATIVE = ("팔로잉", "팔로워", "취소", "following", "followers", "unfollow", "remove")
+# 팔로우와 무관한데 '팔로우' 글자가 들어간 링크/문구를 걸러내기 위한 길이 상한(글자 수).
+_FOLLOW_TEXT_MAXLEN = 12
+# 팔로우 버튼이 늦게 그려지는 경우를 기다리는 시간(초)과, 클릭 후 상태 변화를 확인하는 시간(초).
+FOLLOW_LOOKUP_TIMEOUT = 6
+FOLLOW_CONFIRM_TIMEOUT = 6
+
+
+def _norm_text(raw):
+    """버튼 텍스트 정규화: 좌우 공백 제거 + 소문자 + 내부 연속 공백 1칸."""
+    return " ".join((raw or "").split()).lower()
+
+
+def classify_follow_text(raw):
+    """버튼 문구 하나를 'following' / 'follow' / None 으로 분류한다.
+
+    반환값:
+      "following" - 이미 팔로우 중이거나 요청을 보낸 상태(= 우리 입장에서는 성공/스킵)
+      "follow"    - 지금 눌러야 하는 팔로우 버튼("팔로우", "맞팔로우", "Follow back" ...)
+      None        - 팔로우와 무관한 버튼
+
+    이미-팔로우 판정을 먼저 한다: "팔로우 취소"처럼 두 단어가 다 들어간 문구를 팔로우 버튼으로
+    오인해 누르면 **언팔로우**가 돼버리기 때문이다.
+    """
+    t = _norm_text(raw)
+    if not t:
+        return None
+    if t in FOLLOWING_TEXTS:
+        return "following"
+    if t in FOLLOW_TEXTS:
+        return "follow"
+    if len(t) > _FOLLOW_TEXT_MAXLEN:
+        return None
+    if any(neg in t for neg in _FOLLOW_NEGATIVE):
+        # "팔로잉"/"팔로우 취소" 계열은 이미 팔로우 중이라는 신호로만 쓴다(누르지 않는다).
+        if "팔로잉" in t or "following" in t:
+            return "following"
+        return None
+    if "팔로우" in t or "follow" in t:
+        return "follow"
+    return None
 
 # 프로필 페이지의 [메시지] 버튼(= DM 스레드를 여는 정식 경로). 한국어/영어 UI 모두 대응.
 MESSAGE_BUTTON_TEXTS = {"message", "메시지", "메시지 보내기", "send message"}
@@ -146,16 +201,46 @@ def goto_login_screen(driver):
     driver.get(config.INSTAGRAM_LOGIN_URL)
 
 
-def current_username(driver):
-    """지금 로그인된 인스타 아이디를 읽는다(못 읽으면 None).
+def current_user_id(driver):
+    """지금 붙어 있는 인스타 계정의 **숫자 id**(ds_user_id 쿠키). 못 읽으면 None.
 
-    별명만 보고는 어떤 계정이 붙어 있는지 알 수 없어서 '계정 전환이 안 된다'는 상황을 진단할 수
-    없다. 페이지 이동 없이 현재 화면에서만 읽는다.
+    계정 동일성 판정의 유일한 정답. 화면(DOM)에서 아이디를 긁는 방식은 피드 글쓴이/추천 계정을
+    잘못 집을 수 있지만, `ds_user_id` 쿠키는 인스타가 로그인 세션에 직접 심어 주는 값이라
+    피드 내용과 무관하다. '별명은 B 인데 세션은 A' 같은 사고를 이 값으로 잡는다.
     """
     try:
-        name = driver.execute_script(
-            "var m=document.documentElement.innerHTML.match("
-            "/\"username\"\\s*:\\s*\"([A-Za-z0-9._]{1,30})\"/); return m ? m[1] : null;")
+        for c in driver.get_cookies():
+            if c.get("name") == "ds_user_id" and c.get("value"):
+                return str(c["value"])
+    except Exception:
+        pass
+    return None
+
+
+# 인스타 웹이 문서에 심어 두는 '지금 로그인한 사용자' 블록. 실측(진단 ZIP):
+#   "PolarisViewer",[],{"data":{... "id":"45010010845", ... "username":"xxtwinklebeamxx" ...}}
+_VIEWER_USERNAME_JS = (
+    "var h=document.documentElement.innerHTML;"
+    "var i=h.indexOf('PolarisViewer');"
+    "if(i<0){return null;}"
+    "var seg=h.slice(i,i+8000);"
+    "var m=seg.match(/\"username\":\"([A-Za-z0-9._]{1,30})\"/);"
+    "return m?m[1]:null;"
+)
+
+
+def current_username(driver):
+    """지금 로그인된 인스타 아이디를 읽는다(못 읽으면 None). 페이지 이동은 하지 않는다.
+
+    v1.3.x 는 문서 전체에서 **첫 번째** `"username":"..."` 를 집었다. 프로필 페이지에서는
+    우연히 로그인 사용자가 먼저 나와 맞았지만, 홈 피드에서는 피드 글쓴이/추천 계정이 먼저
+    나올 수 있어서 진단 로그의 `user=` 자체를 믿을 수 없었다(고객 로그의
+    `login_reused account=mightyjimin user=mightysun_09` 가 이 방식으로 찍힌 값이다).
+    이제 '로그인 사용자' 전용 블록(PolarisViewer) -> 좌측 내비의 내 프로필 링크 순으로 읽고,
+    둘 다 실패할 때만 예전 방식으로 폴백한다.
+    """
+    try:
+        name = driver.execute_script(_VIEWER_USERNAME_JS)
         if name:
             return name
     except Exception:
@@ -164,12 +249,54 @@ def current_username(driver):
         for a in driver.find_elements(By.CSS_SELECTOR, "a[href^='/'][role='link']"):
             href = (a.get_attribute("href") or "").rstrip("/")
             slug = href.rsplit("/", 1)[-1]
-            img = a.find_elements(By.CSS_SELECTOR, "img[alt*='프로필'], img[alt*='profile']")
-            if img and slug:
-                return slug
+            if not slug:
+                continue
+            for img in a.find_elements(By.CSS_SELECTOR, "img[alt]"):
+                alt = img.get_attribute("alt") or ""
+                # 내 프로필 사진의 alt 는 "<아이디>님의 프로필 사진" / "<id>'s profile picture".
+                if slug in alt and ("프로필" in alt or "profile" in alt.lower()):
+                    return slug
+    except Exception:
+        pass
+    try:
+        name = driver.execute_script(
+            "var m=document.documentElement.innerHTML.match("
+            "/\"username\"\\s*:\\s*\"([A-Za-z0-9._]{1,30})\"/); return m ? m[1] : null;")
+        if name:
+            return name
     except Exception:
         pass
     return None
+
+
+def current_identity(driver):
+    """(숫자 id, 아이디) 튜플. 계정 바인딩 검증에 쓴다."""
+    return current_user_id(driver), current_username(driver)
+
+
+def clear_session(driver):
+    """이 크롬 프로필의 로그인 세션만 끊고 로그인 화면으로 보낸다(프로필 폴더는 유지).
+
+    '별명 != 실제 계정' 이 감지됐을 때 자동으로 부르는 경로. 크롬이 떠 있는 동안 프로필 폴더를
+    통째로 지우는 건 불가능/위험하므로, 쿠키만 지워서 확실히 새 로그인을 받게 한다.
+    """
+    try:
+        driver.get(config.INSTAGRAM_BASE + "/")
+    except Exception:
+        pass
+    try:
+        driver.delete_all_cookies()
+    except Exception:
+        pass
+    try:
+        driver.execute_script("try{localStorage.clear();sessionStorage.clear();}catch(e){}")
+    except Exception:
+        pass
+    try:
+        driver.get(config.INSTAGRAM_LOGIN_URL)
+    except Exception:
+        pass
+    return True
 
 
 def _login_appears_complete(driver):
@@ -299,30 +426,121 @@ def follow_profile(driver, profile_url, log=print):
 
     _human_pause(config.PROFILE_VIEW_PAUSE_MIN, config.PROFILE_VIEW_PAUSE_MAX)  # 훑어보는 대기
 
-    buttons = _find_buttonish(driver)
-    already_following = False
-    for el in buttons:
-        try:
-            t = (el.text or "").strip().lower()
-        except Exception:
-            continue
-        if t in FOLLOWING_TEXTS:
-            already_following = True
-        if t in FOLLOW_TEXTS:
-            try:
-                el.click()
-                log(f"팔로우 클릭: {profile_url}")
-                time.sleep(random.uniform(config.POST_FOLLOW_CLICK_PAUSE_MIN,
-                                          config.POST_FOLLOW_CLICK_PAUSE_MAX))
-                return ActionResult(True, "followed")
-            except Exception as e:
-                return ActionResult(False, f"follow_click_failed: {e}")
-
-    if already_following:
+    follow_el, state = _find_follow_control(driver)
+    if state == "following":
         log(f"이미 팔로우 중 (스킵): {profile_url}")
         return ActionResult(True, "already_following")
 
-    return ActionResult(False, "follow_button_not_found")
+    if follow_el is None:
+        # 여기까지 왔는데 팔로우 계열 컨트롤이 하나도 없다. 프로필 자체가 안 떴을 수도 있으니
+        # 'DOM 이 바뀐 것'과 '페이지가 안 뜬 것'을 구분해서 보고한다(전자만 selector-miss).
+        if not _profile_header_loaded(driver):
+            return ActionResult(False, "profile_page_not_loaded")
+        return ActionResult(False, "follow_button_not_found")
+
+    if not _safe_click(driver, follow_el):
+        return ActionResult(False, "follow_click_failed")
+    log(f"팔로우 클릭: {profile_url}")
+    _human_pause(config.POST_FOLLOW_CLICK_PAUSE_MIN, config.POST_FOLLOW_CLICK_PAUSE_MAX)
+
+    # 클릭이 실제로 먹었는지 확인한다. 버튼이 '팔로잉'/'요청됨' 으로 바뀌어야 성공이다.
+    # (예전 버전은 클릭 예외만 없으면 무조건 followed 로 보고해서, 실제로는 안 눌린 경우가
+    #  성공으로 집계됐다.)
+    confirmed = _wait_follow_state(driver, timeout_s=FOLLOW_CONFIRM_TIMEOUT)
+    if confirmed == "following":
+        return ActionResult(True, "followed")
+    if confirmed == "follow":
+        return ActionResult(False, "follow_click_no_change")
+    # 버튼이 사라졌거나(레이아웃 변경) 상태를 못 읽는 경우: 클릭 자체는 들어갔으므로 성공으로
+    # 보되 사유를 남긴다. 여기서 실패로 몰면 이미 팔로우된 사람을 계속 재시도하게 된다.
+    return ActionResult(True, "followed_unverified")
+
+
+def _profile_header_loaded(driver):
+    """프로필 페이지가 실제로 그려졌는지(헤더 + 사용자 이름 영역)."""
+    try:
+        headers = driver.find_elements(By.TAG_NAME, "header")
+    except Exception:
+        return False
+    for h in headers:
+        try:
+            if h.is_displayed():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _profile_header(driver):
+    """프로필 상단 헤더(<header>). 팔로우/메시지 버튼이 여기 안에 있다.
+
+    실측(고객 진단 ZIP 6건 전부): `header > section > ... > button[type=button]` 이 팔로우
+    버튼이고, 페이지 아래쪽 '비슷한 계정' 추천 목록의 팔로우/팔로잉 버튼은 header 바깥이다.
+    헤더로 범위를 좁히지 않으면 추천 계정의 '팔로잉' 을 보고 '이미 팔로우 중' 이라고 오판하거나,
+    최악의 경우 추천 계정을 대신 팔로우한다.
+    """
+    try:
+        for h in driver.find_elements(By.TAG_NAME, "header"):
+            try:
+                if h.is_displayed():
+                    return h
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _buttonish_in(scope):
+    xp = ".//button | .//div[@role='button'] | .//span[@role='button']"
+    try:
+        return scope.find_elements(By.XPATH, xp)
+    except Exception:
+        return []
+
+
+def _follow_state_from_buttons(driver):
+    """프로필 헤더의 버튼들을 훑어 (팔로우 버튼 요소, 상태) 를 돌려준다.
+
+    상태는 'following'(이미 팔로우/요청됨) / 'follow'(눌러야 함) / None(관련 버튼 없음).
+    '이미 팔로우 중' 이 하나라도 보이면 팔로우 버튼보다 우선한다(오클릭으로 언팔로우되는 것을
+    막는다). 헤더를 못 찾은 경우에만 문서 전체로 폴백한다.
+    """
+    header = _profile_header(driver)
+    elements = _buttonish_in(header) if header is not None else _find_buttonish(driver)
+    follow_el = None
+    for el in elements:
+        try:
+            kind = classify_follow_text(el.text)
+        except StaleElementReferenceException:
+            continue
+        except Exception:
+            continue
+        if kind == "following":
+            return None, "following"
+        if kind == "follow" and follow_el is None:
+            follow_el = el
+    return follow_el, ("follow" if follow_el is not None else None)
+
+
+def _find_follow_control(driver):
+    """팔로우 버튼(또는 이미-팔로우 상태)을 찾는다. DOM 이 늦게 그려지는 경우까지 기다린다."""
+    deadline = time.time() + FOLLOW_LOOKUP_TIMEOUT
+    follow_el, state = _follow_state_from_buttons(driver)
+    while state is None and time.time() < deadline:
+        time.sleep(0.5)
+        follow_el, state = _follow_state_from_buttons(driver)
+    return follow_el, state
+
+
+def _wait_follow_state(driver, timeout_s=FOLLOW_CONFIRM_TIMEOUT):
+    """클릭 후 버튼 상태가 '팔로잉/요청됨' 으로 바뀔 때까지 짧게 기다린다."""
+    deadline = time.time() + timeout_s
+    _, last = _follow_state_from_buttons(driver)   # 최소 한 번은 반드시 확인한다
+    while last != "following" and time.time() < deadline:
+        time.sleep(0.5)
+        _, last = _follow_state_from_buttons(driver)
+    return last
 
 
 def _type_like_human(element, text):
