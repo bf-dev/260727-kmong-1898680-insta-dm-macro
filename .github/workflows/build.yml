@@ -59,6 +59,11 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python test_account_switch.py -v
 
+      - name: Real swap self-test on Windows (한글 경로 exe 를 실제로 교체 - 260731 stuck-on-1.3.1 bug)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python ci/swap_selftest.py
+
       - name: Build exe (GUI, no console)
         run: >
           pyinstaller --onefile --noconsole
