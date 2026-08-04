@@ -1395,6 +1395,72 @@ def _run_guidemo(root, app):
     except Exception as e:
         app._log(f"[v1.7.0 확인] 실행 중 오류: {e}")
 
+    # ---- v1.8.0: 중지 -> 시작 이 다시 도는가를 이 창에서 **실제 코드로** 돌려 보여 준다 ----
+    # 고객 보고: "중지했다가 다시 '시작'버튼을 누르면 아무 반응이 없어요".
+    # 여기서 실제 MacroEngine 을 만들어 끝까지 돌린 뒤, 끝난 엔진에 상태를 물어보고(예전엔
+    # 이 한 줄이 TypeError 로 [시작] 을 죽였다) 새 실행이 걸리는지를 화면에 남긴다.
+    try:
+        import macro_engine as _me
+        import tempfile as _tf2
+
+        demo_xlsx = os.path.join(_tf2.mkdtemp(prefix="restart_demo_"), "d.xlsx")
+        with open(demo_xlsx, "wb") as _f:
+            _f.write(b"x" * 10)
+
+        class _InstantActions:
+            SELECTOR_MISS_DETAILS = ()
+            @staticmethod
+            def follow_profile(_s, _u, log=None):
+                return type("R", (), {"ok": True, "detail": "followed"})()
+            @staticmethod
+            def send_dm(_s, _u, _m, log=None):
+                return type("R", (), {"ok": True, "detail": "sent"})()
+            @staticmethod
+            def detect_restriction(_s):
+                return None
+
+        eng = _me.MacroEngine(None, [], demo_xlsx, "__restart_demo__",
+                              log_cb=lambda *_: None, daily_cap=5, actions=_InstantActions)
+        eng.start()
+        eng.join(timeout=15)
+        eng.is_alive()      # v1.7.0 까지 여기서 TypeError: 'Event' object is not callable
+        app._log(f"[v1.8.0 확인] 끝난 엔진에 상태 질의: is_alive()={eng.is_alive()} "
+                 f"is_running()={eng.is_running()} finished={eng.finished} "
+                 f"- 예전엔 이 줄이 TypeError 를 내며 [시작] 버튼을 통째로 죽였다")
+        clashes = [n for n in _me.MacroEngine._THREAD_RESERVED if n in eng.__dict__]
+        app._log(f"[v1.8.0 확인] Thread 내부 이름 충돌: {clashes or '없음'} "
+                 f"(_stop -> _stop_event 로 개명, 임포트 시점 안전장치 있음)")
+
+        # [시작] 이 거절될 때 고객이 실제로 보게 될 문구를 그대로 만들어 본다(무반응 금지).
+        # CI 에서는 모달 팝업이 뜨면 스크린샷 단계가 영원히 멈추므로, 팝업은 띄우지 않고
+        # '무엇이 떴을 것인가' 를 가로채 로그창에 그대로 적는다.
+        global messagebox
+        _real_box, _shown = messagebox, []
+
+        class _CapturedBox:
+            @staticmethod
+            def showerror(title, msg, *a, **k):
+                _shown.append(f"{title}: {msg}")
+            showwarning = showinfo = showerror
+            @staticmethod
+            def askyesno(*a, **k):
+                return False
+
+        saved = (app.engine, app.session, app.logged_in, app.driver, app._last_start_reason)
+        messagebox = _CapturedBox
+        try:
+            app.engine, app.session, app.logged_in, app.driver = None, None, False, None
+            app.on_start_click()
+        finally:
+            messagebox = _real_box
+        app._log(f"[v1.8.0 확인] 로그인 없이 [시작] -> 사유코드 "
+                 f"'{app._last_start_reason}', 안내 팝업 '{(_shown or ['(없음)'])[0][:90]}' "
+                 f"- 화면 로그 + 팝업 + 진단서버에 동시에 남는다 (예전엔 아무 반응도 없었다)")
+        (app.engine, app.session, app.logged_in, app.driver, app._last_start_reason) = saved
+        app.status_var.set("상태: 로그인됨 (demo_account) [데모 모드]")
+    except Exception as e:
+        app._log(f"[v1.8.0 확인] 실행 중 오류: {e}")
+
     hold_ms = int(os.environ.get("DIAG_HOLD_MS", "6000"))
     root.lift()
     try:
