@@ -1427,9 +1427,13 @@ def _run_guidemo(root, app):
         app._log(f"[v1.8.0 확인] 끝난 엔진에 상태 질의: is_alive()={eng.is_alive()} "
                  f"is_running()={eng.is_running()} finished={eng.finished} "
                  f"- 예전엔 이 줄이 TypeError 를 내며 [시작] 버튼을 통째로 죽였다")
-        clashes = [n for n in _me.MacroEngine._THREAD_RESERVED if n in eng.__dict__]
-        app._log(f"[v1.8.0 확인] Thread 내부 이름 충돌: {clashes or '없음'} "
-                 f"(_stop -> _stop_event 로 개명, 임포트 시점 안전장치 있음)")
+        # Thread 가 자기 __init__ 에서 세우는 값(_target, _name 등)은 정상이다. 위험한 건
+        # **메서드**를 덮은 경우뿐이므로 그 기준으로만 센다(안전장치와 같은 판정).
+        clashes = [n for n in _me.MacroEngine._THREAD_RESERVED
+                   if n in eng.__dict__ and callable(getattr(threading.Thread, n, None))]
+        app._log(f"[v1.8.0 확인] Thread 내부 '메서드' 이름을 덮은 곳: {clashes or '없음'} "
+                 f"(_stop -> _stop_event 로 개명. 다시 덮으면 임포트 시점에 프로그램이 "
+                 f"아예 안 켜지도록 안전장치를 걸어 뒀다)")
 
         # [시작] 이 거절될 때 고객이 실제로 보게 될 문구를 그대로 만들어 본다(무반응 금지).
         # CI 에서는 모달 팝업이 뜨면 스크린샷 단계가 영원히 멈추므로, 팝업은 띄우지 않고
