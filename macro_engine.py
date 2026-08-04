@@ -49,7 +49,34 @@ def halt_message(reason):
 
 class MacroEngine(threading.Thread):
     """`session` 은 엔진에 따라 다르다: api 엔진이면 ig_api.ApiSession, browser 엔진이면
-    selenium 드라이버. `actions` 모듈이 그 차이를 전부 흡수하므로 아래 흐름은 동일하다."""
+    selenium 드라이버. `actions` 모듈이 그 차이를 전부 흡수하므로 아래 흐름은 동일하다.
+
+    v1.8.0 - **여기가 '[시작] 이 죽는' 버그의 진짜 원인이었다.**
+    v1.1.0 부터 이 클래스는 중지 플래그를 `self._stop = threading.Event()` 로 들고 있었다.
+    그런데 `threading.Thread` 는 `_stop` 이라는 **내부 메서드**를 이미 쓴다. 스레드가 끝나면
+    CPython 의 `Thread._wait_for_tstate_lock()` 이 `self._stop()` 을 호출하는데, 그 자리에
+    Event 객체가 덮여 있으니 `TypeError: 'Event' object is not callable` 이 난다.
+    `is_alive()` 가 `_wait_for_tstate_lock()` 을 부르므로 결과는:
+
+        **한 번이라도 끝난 엔진에 `engine.is_alive()` 를 부르면 예외가 터진다.**
+
+    `on_start_click()` 의 첫 줄이 바로 그 호출이라, 매크로가 한 번 끝난 뒤에는 [시작] 이
+    예외로 즉사했다. tkinter 는 버튼 콜백 예외를 stderr 로만 흘리고, `--noconsole` exe 에서는
+    stderr 가 None 이라 **화면에도 로그에도 아무것도 안 남았다.** 고객이 본 그대로다:
+    "재시작을 하고 싶어서 다시 '시작'버튼을 누르면 아무 반응이 없어요".
+
+    고객 실측 로그(1.1.0 ~ 1.6.0, 5일치)가 이것을 그대로 증명한다: `macro_start` 앞에는
+    **예외 없이 항상** `process_start`(앱 재시작)가 있다. 한 프로세스 안에서 두 번 실행된
+    적이 단 한 번도 없다.
+
+    그래서 이름을 `_stop_event` 로 바꾼다. 아래 `_ASSERT` 가 Thread 내부 이름을 다시
+    덮는 순간 임포트 시점에 터지므로, 같은 실수가 두 번 나올 수 없다.
+    """
+
+    # Thread 가 자기 것으로 쓰는 이름들. 여기에 뭘 대입하면 스레드가 끝나는 순간 깨진다.
+    _THREAD_RESERVED = ("_stop", "_wait_for_tstate_lock", "_bootstrap", "_bootstrap_inner",
+                        "_set_ident", "_set_tstate_lock", "_reset_internal_locks",
+                        "_started", "_target", "_args", "_kwargs", "_daemonic", "_name")
 
     def __init__(self, session, rows, excel_path, account_label, log_cb, done_cb=None,
                  daily_cap=None, halt_cb=None, actions=None):
@@ -63,14 +90,28 @@ class MacroEngine(threading.Thread):
         self.done_cb = done_cb or (lambda *_: None)
         self.halt_cb = halt_cb or (lambda *_: None)
         self.daily_cap = int(daily_cap) if daily_cap else config.DEFAULT_DAILY_CAP
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self.stats = {"followed": 0, "dm_sent": 0, "failed": 0, "skipped": 0}
         self.halt_reason = None
+        self.finished = False       # run() 이 끝까지 갔는가(스레드 상태와 별개로 우리가 안다)
         self._fail_streak = 0
         self._selector_miss_streak = 0
 
     def stop(self):
-        self._stop.set()
+        self._stop_event.set()
+
+    def stop_requested(self):
+        return self._stop_event.is_set()
+
+    def is_running(self):
+        """`is_alive()` 를 직접 부르지 않는다. 끝난 스레드에 물어보다 예외가 나면 그것만으로
+        [시작] 이 죽기 때문이다. 판단이 불가능하면 '안 돌고 있다' 로 본다(= 막지 않는다)."""
+        if self.finished:
+            return False
+        try:
+            return bool(self.is_alive())
+        except Exception:
+            return False
 
     def _log(self, msg):
         try:
@@ -104,6 +145,27 @@ class MacroEngine(threading.Thread):
         return True
 
     def run(self):
+        """스레드 본체는 **무슨 일이 있어도** `finished` 를 세우고 끝난다. 그래야 다음 [시작]
+        이 '아직 도는 중' 으로 오판하지 않는다(예전엔 예외로 죽은 스레드가 그대로 남았다)."""
+        try:
+            self._run_body()
+        except Exception as e:
+            self.halt_reason = f"engine_crash:{e}"
+            self._log(f"[오류] 매크로 실행 중 예기치 못한 오류로 멈췄습니다: {e}")
+            try:
+                bridge.remote_log("macro_crash",
+                                  f"account={self.account_label} error={e}", force=True)
+            except Exception:
+                pass
+            try:
+                self.halt_cb("engine_crash", f"매크로가 오류로 멈췄습니다: {e}\n"
+                                             f"[시작] 을 다시 누르면 남은 사람부터 이어서 진행됩니다.")
+            except Exception:
+                pass
+        finally:
+            self.finished = True
+
+    def _run_body(self):
         done_rows = progress_store.load_done_rows(self.excel_path, self.account_label)
         total = len(self.rows)
         pending = [r for r in self.rows if r.row_no not in done_rows]
@@ -125,7 +187,7 @@ class MacroEngine(threading.Thread):
             return
 
         for idx, row in enumerate(pending):
-            if self._stop.is_set():
+            if self._stop_event.is_set():
                 self._log("중지 요청으로 매크로를 멈췄습니다.")
                 break
 
@@ -157,7 +219,7 @@ class MacroEngine(threading.Thread):
             if self._restricted(row, "팔로우"):
                 break
 
-            if self._stop.is_set():
+            if self._stop_event.is_set():
                 break
 
             time.sleep(random.uniform(config.DELAY_AFTER_FOLLOW_MIN, config.DELAY_AFTER_FOLLOW_MAX))
@@ -185,7 +247,13 @@ class MacroEngine(threading.Thread):
             # 반드시 완료 처리한다. 재시도가 필요한 건 위의 '예외'/'중단' 경로뿐이다.
             progress_store.mark_done(self.excel_path, self.account_label, row.row_no)
             used_today = progress_store.bump_daily_count(self.account_label)
-            self.done_cb(row.row_no, follow_result.ok, dm_result.ok)
+            # 화면 갱신 실패(창이 닫혔다, Tk 호출이 스레드에서 거절됐다 등)가 **실행 자체를**
+            # 끝내면 안 된다. 예전엔 여기서 난 예외가 그대로 스레드를 죽였고, 고객 눈에는
+            # "1명만 보내고 멈췄다" 로 보였다.
+            try:
+                self.done_cb(row.row_no, follow_result.ok, dm_result.ok)
+            except Exception as e:
+                bridge.remote_log("row_done_cb_error", f"row={row.row_no} error={e}")
 
             bridge.remote_log(
                 "row_done",
@@ -207,11 +275,11 @@ class MacroEngine(threading.Thread):
                 self._halt("daily_cap")
                 break
 
-            if idx < len(pending) - 1 and not self._stop.is_set():
+            if idx < len(pending) - 1 and not self._stop_event.is_set():
                 wait_s = random.uniform(config.DELAY_BETWEEN_PEOPLE_MIN, config.DELAY_BETWEEN_PEOPLE_MAX)
                 self._log(f"다음 사람까지 {wait_s:.0f}초 대기합니다 (계정 보호를 위한 랜덤 간격)...")
                 for _ in range(int(wait_s * 2)):
-                    if self._stop.is_set():
+                    if self._stop_event.is_set():
                         break
                     time.sleep(0.5)
 
@@ -253,3 +321,29 @@ class MacroEngine(threading.Thread):
             )
         except Exception:
             pass
+
+
+def _assert_no_thread_name_collision():
+    """임포트 시점 안전장치. `MacroEngine` 인스턴스가 `Thread` 내부 이름을 덮으면 그 순간 터진다.
+
+    v1.1.0~v1.7.0 은 `self._stop = Event()` 로 `Thread._stop` 을 덮었고, 그 결과 매크로가 한 번
+    끝난 뒤 `engine.is_alive()` 가 TypeError 를 던져 [시작] 버튼이 조용히 죽었다. 고객은 앱을
+    껐다 켜야만 다시 돌릴 수 있었다(5일치 로그가 그대로 증명). 다시는 조용히 못 들어오게 막는다.
+    """
+    class _Probe(MacroEngine):
+        def __init__(self):
+            MacroEngine.__init__(self, None, [], "", "check", log_cb=None)
+
+    probe = _Probe()
+    bad = [n for n in MacroEngine._THREAD_RESERVED if n in probe.__dict__
+           and callable(getattr(threading.Thread, n, None))]
+    if bad:
+        raise RuntimeError(
+            f"MacroEngine 이 threading.Thread 의 내부 이름을 덮었습니다: {bad}. "
+            f"끝난 스레드에 is_alive() 를 부르는 순간 깨지고 [시작] 이 조용히 죽습니다.")
+    # 끝난 스레드에 물어봐도 안전한가를 실제로 확인한다(가장 확실한 증거).
+    probe.finished = True
+    probe.is_running()
+
+
+_assert_no_thread_name_collision()

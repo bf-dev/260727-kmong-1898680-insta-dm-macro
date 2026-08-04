@@ -63,6 +63,9 @@ class App:
         # 이 상태를 알아야 한다(고객 실측: 로그인 확인이 28초 걸리는 동안 [시작] 을 눌렀다).
         self._login_busy = False
         self._start_pending = False
+        # 마지막 [시작] 이 어떻게 끝났는가("started" 또는 거절 사유코드). None 인 채로 핸들러가
+        # 끝났다면 그것이 곧 '조용한 죽은 버튼' 이다 - 회귀 테스트가 이 값을 감시한다.
+        self._last_start_reason = None
 
         self.account_var = tk.StringVar(value="default")
         self.live_var = tk.StringVar(value="현재 실행 계정: (로그인하면 표시됩니다)")
@@ -83,12 +86,53 @@ class App:
         self._update_url = config.MANUAL_DOWNLOAD_URL
         self._update_reason = ""
 
+        # v1.8.0 안전망. tkinter 는 버튼 콜백에서 예외가 나면 `report_callback_exception` 으로
+        # 넘기고, 기본 구현은 그걸 **stderr 로만** 흘린다. `--noconsole` exe 에서 stderr 는
+        # None 이므로 예외는 흔적도 없이 사라지고 버튼만 죽은 것처럼 보인다. 고객이 5일 동안
+        # 겪은 게 정확히 그것이다. 이제는 화면 로그 + 팝업 + 진단 서버에 반드시 남는다.
+        root.report_callback_exception = self._on_callback_exception
+
         self._build_ui()
         self._migrate_legacy_bindings()
         self.updater_thread = updater.start_updater(
             stop_running_loop=self._stop_macro_silent, status_cb=self._log,
             blocked_cb=self._on_update_blocked, pre_swap_cb=self._quit_browser_for_swap)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ---------- 안전망 (v1.8.0) ----------
+    def _on_callback_exception(self, exc_type, exc_value, tb):
+        """버튼/타이머 콜백에서 터진 예외를 사용자가 볼 수 있는 곳으로 끌어낸다."""
+        import traceback
+        detail = "".join(traceback.format_exception(exc_type, exc_value, tb))
+        try:
+            self._log(f"[오류] 방금 누른 동작이 오류로 멈췄습니다: {exc_type.__name__}: {exc_value}")
+        except Exception:
+            pass
+        try:
+            bridge.remote_log("ui_callback_error",
+                              f"{exc_type.__name__}: {exc_value}\n{detail[-1500:]}", force=True)
+        except Exception:
+            pass
+        try:
+            messagebox.showerror("오류",
+                                 f"동작 중 오류가 발생했습니다.\n\n{exc_type.__name__}: {exc_value}\n\n"
+                                 f"진단 정보는 제작자에게 자동 전송됐습니다. "
+                                 f"프로그램은 계속 사용하실 수 있습니다.")
+        except Exception:
+            pass
+
+    def _safe(self, fn, name):
+        """버튼 command 래퍼. 어떤 예외가 나도 사용자에게 보이게 만들고 앱은 살려 둔다."""
+        def _wrapped(*a, **k):
+            try:
+                return fn(*a, **k)
+            except Exception:
+                self._on_callback_exception(*sys.exc_info())
+                try:
+                    bridge.remote_log("ui_handler_error", f"handler={name}", force=True)
+                except Exception:
+                    pass
+        return _wrapped
 
     def _on_close(self):
         try:
@@ -113,9 +157,9 @@ class App:
                                      justify="left", wraplength=760)
         self.update_label.pack(side="left", padx=8, pady=6, fill="x", expand=True)
         ttk.Button(self.update_frame, text="지금 업데이트",
-                   command=self.on_update_now_click).pack(side="right", padx=4, pady=4)
+                   command=self._safe(self.on_update_now_click, "on_update_now_click")).pack(side="right", padx=4, pady=4)
         ttk.Button(self.update_frame, text="다운로드 주소 복사",
-                   command=self.on_copy_update_url_click).pack(side="right", padx=4, pady=4)
+                   command=self._safe(self.on_copy_update_url_click, "on_copy_update_url_click")).pack(side="right", padx=4, pady=4)
 
         acc_frame = ttk.LabelFrame(self.root, text="1) 인스타그램 계정")
         acc_frame.pack(fill="x", **pad)
@@ -127,11 +171,11 @@ class App:
                                           state="readonly", values=["default"])
         self.account_combo.grid(row=0, column=1, padx=6, pady=6)
         self.account_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_account_selected())
-        ttk.Button(acc_frame, text="+ 새 별명", command=self.on_new_label_click).grid(row=0, column=2, padx=4)
+        ttk.Button(acc_frame, text="+ 새 별명", command=self._safe(self.on_new_label_click, "on_new_label_click")).grid(row=0, column=2, padx=4)
         # 별명에 잘못 저장된 계정(예: 'mugenboksa · @mightysun_09')을 고객이 직접 지울 수 있어야
         # 한다. v1.5.0 에는 화면에 틀린 값이 보이는데 고칠 방법이 아예 없었다.
         ttk.Button(acc_frame, text="계정 기록 지우기",
-                   command=self.on_forget_account_click).grid(row=0, column=3, padx=4)
+                   command=self._safe(self.on_forget_account_click, "on_forget_account_click")).grid(row=0, column=3, padx=4)
         ttk.Radiobutton(acc_frame, text="빠른 방식(아이디/비번)", variable=self.engine_var,
                         value="api", command=self._on_engine_change).grid(row=0, column=4, padx=6, sticky="w")
         ttk.Radiobutton(acc_frame, text="크롬 창에서 직접 로그인", variable=self.engine_var,
@@ -146,9 +190,9 @@ class App:
         ttk.Label(self.cred_frame, text="(비밀번호는 저장하지 않습니다. 최초 1회만 입력)").grid(
             row=1, column=0, columnspan=4, padx=6, sticky="w")
 
-        ttk.Button(acc_frame, text="로그인 / 계정 전환", command=self.on_login_click).grid(row=2, column=1, padx=6, pady=6)
-        ttk.Button(acc_frame, text="다른 계정으로 로그인", command=self.on_switch_account_click).grid(row=2, column=2, padx=6)
-        ttk.Button(acc_frame, text="로그아웃", command=self.on_logout_click).grid(row=2, column=3, padx=6)
+        ttk.Button(acc_frame, text="로그인 / 계정 전환", command=self._safe(self.on_login_click, "on_login_click")).grid(row=2, column=1, padx=6, pady=6)
+        ttk.Button(acc_frame, text="다른 계정으로 로그인", command=self._safe(self.on_switch_account_click, "on_switch_account_click")).grid(row=2, column=2, padx=6)
+        ttk.Button(acc_frame, text="로그아웃", command=self._safe(self.on_logout_click, "on_logout_click")).grid(row=2, column=3, padx=6)
         # 기본은 꺼짐. 켠 사람만 프로그램이 인스타 자체 '계정 전환'을 대신 눌러 준다.
         ttk.Checkbutton(acc_frame,
                         text="별명에 기억된 계정으로 크롬을 자동 전환 (권장: 끔)",
@@ -171,14 +215,14 @@ class App:
         file_frame = ttk.LabelFrame(self.root, text="2) 엑셀 파일 (C열=인스타 URL, F열=DM 문구)")
         file_frame.pack(fill="x", **pad)
         ttk.Entry(file_frame, textvariable=self.excel_var, width=70).grid(row=0, column=0, padx=6, pady=6)
-        ttk.Button(file_frame, text="찾아보기", command=self.on_browse_click).grid(row=0, column=1, padx=6)
-        ttk.Button(file_frame, text="불러오기", command=self.on_load_click).grid(row=0, column=2, padx=6)
+        ttk.Button(file_frame, text="찾아보기", command=self._safe(self.on_browse_click, "on_browse_click")).grid(row=0, column=1, padx=6)
+        ttk.Button(file_frame, text="불러오기", command=self._safe(self.on_load_click, "on_load_click")).grid(row=0, column=2, padx=6)
 
         ctrl_frame = ttk.LabelFrame(self.root, text="3) 실행")
         ctrl_frame.pack(fill="x", **pad)
-        ttk.Button(ctrl_frame, text="시작", command=self.on_start_click).grid(row=0, column=0, padx=6, pady=6)
-        ttk.Button(ctrl_frame, text="중지", command=self.on_stop_click).grid(row=0, column=1, padx=6)
-        ttk.Button(ctrl_frame, text="진행상황 초기화", command=self.on_reset_click).grid(row=0, column=2, padx=6)
+        ttk.Button(ctrl_frame, text="시작", command=self._safe(self.on_start_click, "on_start_click")).grid(row=0, column=0, padx=6, pady=6)
+        ttk.Button(ctrl_frame, text="중지", command=self._safe(self.on_stop_click, "on_stop_click")).grid(row=0, column=1, padx=6)
+        ttk.Button(ctrl_frame, text="진행상황 초기화", command=self._safe(self.on_reset_click, "on_reset_click")).grid(row=0, column=2, padx=6)
         ttk.Label(ctrl_frame, textvariable=self.stats_var).grid(row=0, column=3, padx=16)
         ttk.Label(ctrl_frame, text="하루 최대 처리 인원:").grid(row=1, column=0, padx=6, pady=6, sticky="w")
         ttk.Spinbox(ctrl_frame, from_=config.DAILY_CAP_MIN, to=config.DAILY_CAP_MAX, width=6,
@@ -201,7 +245,11 @@ class App:
         try:
             self.root.after(0, _do)
         except Exception:
-            print(msg)
+            # --noconsole exe 에서는 sys.stdout 이 None 이라 print 가 오히려 앱을 죽인다.
+            try:
+                bridge.remote_log("log_widget_unavailable", str(msg)[:500])
+            except Exception:
+                pass
 
     def _set_status(self, text):
         try:
@@ -884,15 +932,102 @@ class App:
             pass
         return "ready", "adopted_live_window"
 
+    def _start_refused(self, code, user_message, popup=True):
+        """[시작] 이 실행으로 이어지지 않은 **모든** 경로는 반드시 여기를 지난다.
+
+        v1.8.0 의 하드 요구사항: **[시작] 은 절대 조용히 아무것도 안 하면 안 된다.**
+        고객이 겪은 건 '눌러도 아무 반응이 없는' 버튼이었고, 그때 고객은 프로그램이 고장난
+        건지 바쁜 건지 자기를 무시하는 건지 알 방법이 없었다. 그래서 거절은 항상 세 군데에
+        동시에 남는다: 화면 로그 / 팝업 / 진단 서버(Artifacts API).
+        """
+        self._start_pending = False
+        self._last_start_reason = code
+        self._log(f"[시작 안 됨] {user_message} (사유코드: {code})")
+        try:
+            self._set_status(f"상태: 시작하지 않았습니다 ({code})")
+        except Exception:
+            pass
+        try:
+            bridge.remote_log("start_refused", f"code={code} msg={user_message}", force=True)
+        except Exception:
+            pass
+        if popup:
+            try:
+                messagebox.showerror("시작하지 않았습니다", user_message)
+            except Exception:
+                pass
+
     def on_start_click(self):
-        if self.engine is not None and self.engine.is_alive():
-            messagebox.showinfo("안내", "이미 실행 중입니다.")
+        # 눌렀다는 사실 자체를 무조건 먼저 남긴다. 이 줄이 있으면 다음에 고객이 "반응이 없다"
+        # 고 할 때, 핸들러가 아예 안 불렸는지 / 불렸는데 중간에 멈췄는지를 로그로 가른다.
+        self._last_start_reason = None
+        self._log("[시작] 버튼을 눌렀습니다. 실행 조건을 확인합니다...")
+        try:
+            bridge.remote_log("start_clicked",
+                              f"engine={'yes' if self.engine else 'no'} "
+                              f"logged_in={self.logged_in} busy={self._login_busy}", force=True)
+        except Exception:
+            pass
+        # `is_alive()` 를 직접 부르지 않는다. 그 호출이 바로 v1.7.0 까지 [시작] 을 죽이던
+        # 자리다(macro_engine.MacroEngine 주석 참고). 그리고 엔진 자리에 무엇이 들어 있든
+        # **이 한 줄 때문에 버튼이 죽는 일은 다시 없어야 한다.** 못 물어보면 '안 돌고 있다'
+        # 로 보고 그대로 진행한다(막는 것보다 도는 게 낫다).
+        try:
+            busy = self.engine is not None and self.engine.is_running()
+        except Exception as e:
+            self._log(f"[안내] 이전 실행 상태를 확인하지 못해 새로 시작합니다. ({e})")
+            bridge.remote_log("start_engine_probe_failed", f"error={e}", force=True)
+            self.engine, busy = None, False
+        if busy:
+            try:
+                winding_down = self.engine.stop_requested()
+            except Exception:
+                winding_down = False
+            if winding_down:
+                # 고객이 실제로 하는 동작: [중지] 를 누르고 곧바로 [시작] 을 누른다. 엔진은
+                # '진행 중인 사람까지만' 마치고 멈추므로 몇 초~몇십 초 마무리 중이다. 여기서
+                # 거절하지 않고, 마무리가 끝나는 대로 자동으로 이어서 시작한다.
+                self._log("이전 작업이 마무리되는 대로 자동으로 다시 시작합니다. "
+                          "잠시만 기다려 주세요...")
+                self._set_status("상태: 이전 작업 마무리 중... (끝나면 자동으로 다시 시작합니다)")
+                bridge.remote_log("start_queued_after_stop", "state=winding_down", force=True)
+                self._start_pending = True
+                self._await_engine_then_start(0)
+                return
+            self._start_refused("already_running",
+                                "이미 실행 중입니다. 멈추려면 [중지] 를 눌러 주세요.")
             return
         self._start_pending = True
         self._attempt_start(0)
 
+    ENGINE_WIND_DOWN_MAX_POLLS = 180        # 최대 3분까지 이전 작업 마무리를 기다린다
+
+    def _await_engine_then_start(self, polls):
+        """[중지] 직후의 [시작]: 이전 엔진이 완전히 끝나면 그때 새 실행을 건다."""
+        if not self._start_pending:
+            self._log("[안내] 대기 중이던 [시작] 요청이 취소되어 이어서 시작하지 않습니다.")
+            return
+        if self.engine is None or not self.engine.is_running():
+            self._log("이전 작업이 끝났습니다. 이어서 시작합니다.")
+            self._attempt_start(0)
+            return
+        if polls >= self.ENGINE_WIND_DOWN_MAX_POLLS:
+            self._start_refused("wind_down_timeout",
+                                "이전 작업이 3분 안에 마무리되지 않았습니다. "
+                                "크롬 창 상태를 확인하시고, 계속 이러면 프로그램을 껐다 켜 주세요.")
+            return
+        try:
+            self.root.after(self.START_WAIT_POLL_MS,
+                            lambda: self._await_engine_then_start(polls + 1))
+        except Exception:
+            self._start_refused("wind_down_scheduler_failed",
+                                "이전 작업이 끝나기를 기다리지 못했습니다. "
+                                "잠시 뒤 [시작] 을 다시 눌러 주세요.")
+
     def _attempt_start(self, polls):
         if not self._start_pending:
+            # 시작 대기가 이미 정리됐다(다른 클릭이 처리했거나 거절됐다). 조용히 사라지지 않는다.
+            self._log("[안내] 이전 [시작] 대기가 이미 정리되어 이번 확인은 건너뜁니다.")
             return
         state, why = self._start_readiness()
         if state == "pending":
@@ -906,16 +1041,16 @@ class App:
                     return
                 except Exception:
                     pass
-            self._start_pending = False
             bridge.remote_log("start_wait_timeout", f"why={why} polls={polls}", force=True)
-            messagebox.showerror("오류", "로그인 확인이 끝나지 않았습니다. "
-                                         "[로그인 / 계정 전환] 을 다시 눌러 주세요.")
+            self._start_refused("login_wait_timeout",
+                                "로그인 확인이 끝나지 않았습니다. "
+                                "[로그인 / 계정 전환] 을 다시 눌러 주세요.")
             return
         if state == "none":
-            self._start_pending = False
             bridge.remote_log("start_no_session", f"why={why}", force=True)
-            messagebox.showerror("오류", "먼저 [로그인 / 계정 전환] 을 눌러 크롬 창에서 "
-                                         "인스타그램에 로그인해 주세요.")
+            self._start_refused("no_session",
+                                "먼저 [로그인 / 계정 전환] 을 눌러 크롬 창에서 "
+                                "인스타그램에 로그인해 주세요.")
             return
         self._start_pending = False
         self._begin_run()
@@ -924,17 +1059,29 @@ class App:
         if not self.rows:
             self.on_load_click()
         if not self.rows:
-            messagebox.showerror("오류", "처리할 행이 없습니다. 엑셀을 확인해 주세요.")
+            self._start_refused("no_rows",
+                                "처리할 행이 없습니다. 엑셀 파일을 선택하고 [불러오기] 를 "
+                                "눌러 주세요. (C열=인스타 주소, F열=DM 문구)")
             return
         import macro_engine
         label = self._current_label()
         run_key = self._resolve_run_account(label)
+        # 실행마다 **새 엔진**을 만든다. 스레드는 한 번 끝나면 다시 start() 할 수 없어서,
+        # 예전 객체를 재사용하면 RuntimeError 가 나고 그게 또 조용한 죽은 버튼이 된다.
         self.engine = macro_engine.MacroEngine(
             self.session, self.rows, self.excel_var.get().strip(), run_key,
             log_cb=self._log, done_cb=self._on_row_done,
             daily_cap=settings.get_daily_cap(), halt_cb=self._on_halt,
             actions=self.actions)
-        self.engine.start()
+        try:
+            self.engine.start()
+        except Exception as e:
+            self.engine = None
+            self._start_refused("engine_start_failed",
+                                f"매크로를 시작하지 못했습니다: {e}\n"
+                                f"프로그램을 껐다 켠 뒤 다시 시도해 주세요.")
+            return
+        self._last_start_reason = "started"
         self._log("매크로를 시작합니다.")
 
     def _resolve_run_account(self, label):
@@ -1039,32 +1186,60 @@ class App:
             pass
 
     def _on_row_done(self, row_no, follow_ok, dm_ok):
-        if self.engine:
-            s = self.engine.stats
-            processed = s["dm_sent"] + s["failed"]
-            self.root.after(0, lambda: self.stats_var.set(
-                f"완료 {processed} / 팔로우 {s['followed']} / DM {s['dm_sent']} / 실패 {s['failed']}"))
+        # 엔진 스레드에서 불린다. 화면 갱신이 실패해도 실행은 계속되어야 한다.
+        try:
+            if self.engine:
+                s = self.engine.stats
+                processed = s["dm_sent"] + s["failed"]
+                self.root.after(0, lambda: self.stats_var.set(
+                    f"완료 {processed} / 팔로우 {s['followed']} / DM {s['dm_sent']} / 실패 {s['failed']}"))
+        except Exception:
+            pass
 
     def on_stop_click(self):
-        if self.engine:
+        # [중지] 도 무반응이면 안 된다. 돌고 있지 않을 때도 그 사실을 말해 준다.
+        try:
+            running = self.engine is not None and self.engine.is_running()
+        except Exception:
+            running = False
+        if running:
             self.engine.stop()
-            self._log("중지를 요청했습니다 (진행 중인 사람까지만 마치고 멈춥니다).")
+            self._log("중지를 요청했습니다 (진행 중인 사람까지만 마치고 멈춥니다). "
+                      "멈춘 뒤 [시작] 을 누르면 남은 사람부터 이어서 진행됩니다.")
+            bridge.remote_log("stop_clicked", "state=running", force=True)
+        else:
+            self._log("[안내] 지금 실행 중인 작업이 없습니다. "
+                      "[시작] 을 누르면 남은 사람부터 진행합니다.")
+            bridge.remote_log("stop_clicked", "state=idle", force=True)
+        # 중지 요청이 들어간 순간, 아직 안 끝난 [시작] 대기 폴링도 같이 접는다. 안 그러면
+        # 사용자가 멈추라고 했는데 몇 초 뒤에 혼자 실행이 시작된다.
+        if self._start_pending:
+            self._start_pending = False
+            self._log("[안내] 대기 중이던 [시작] 요청도 함께 취소했습니다.")
 
     def _stop_macro_silent(self):
-        if self.engine:
-            self.engine.stop()
+        if self.engine is not None:
+            try:
+                self.engine.stop()
+            except Exception:
+                pass
 
     def on_reset_click(self):
         path = self.excel_var.get().strip()
         label = self._current_label()
         if not path:
+            self._log("[안내] 엑셀 파일을 먼저 선택해 주세요. 진행상황을 초기화하지 않았습니다.")
             messagebox.showinfo("안내", "엑셀 파일을 먼저 선택해 주세요.")
             return
         if messagebox.askyesno("확인", "이 엑셀+계정 조합의 진행상황을 초기화할까요? "
                                        "(처음부터 다시 팔로우+DM 을 시도합니다)"):
             progress_store.reset(path, label)
             progress_store.reset(path, self._progress_key_for(label))
-            self._log("진행상황을 초기화했습니다.")
+            # 초기화하면 다음 [시작] 은 '처음부터' 다. 메모리에 남은 행도 다시 읽어 둔다.
+            self._log("진행상황을 초기화했습니다. [시작] 을 누르면 1행부터 다시 진행합니다.")
+            bridge.remote_log("progress_reset", f"account={label}", force=True)
+        else:
+            self._log("[안내] 진행상황 초기화를 취소했습니다.")
 
 
 # ---------------- 데모/자동테스트 모드 ----------------
