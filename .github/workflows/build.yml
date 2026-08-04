@@ -69,6 +69,11 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python ci/swap_selftest.py
 
+      - name: Real swap FAILURE self-test on Windows (잠긴 파일 재시도 + 사유 기록 - 260804 stuck-on-1.5.0 bug)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python ci/swap_failure_selftest.py
+
       - name: Build exe (GUI, no console)
         run: >
           pyinstaller --onefile --noconsole
