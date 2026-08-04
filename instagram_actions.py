@@ -197,6 +197,28 @@ def is_logged_in(driver):
     return any(c.get("name") == "sessionid" and c.get("value") for c in cookies)
 
 
+def session_is_live(driver):
+    """**페이지 이동 없이** 이 크롬 창이 지금 로그인 상태인지만 본다(v1.6.0).
+
+    `is_logged_in()` 은 instagram.com 으로 `driver.get()` 을 때리므로 [시작] 버튼 경로에서
+    부르면 (a) 고객이 보고 있는 화면을 마음대로 옮기고 (b) 로그인 스레드가 같은 드라이버를
+    쓰는 중이면 명령이 엉킨다. [시작] 이 '진짜 로그인돼 있나'를 확인할 때는 이 함수를 쓴다.
+
+    판정 근거는 로그인 성공 시에만 심어지는 `sessionid` 쿠키 하나. 로그인 화면에 머물러 있으면
+    False. 크롬 창이 죽었으면 예외가 나므로 False.
+    """
+    try:
+        if "/accounts/login" in (driver.current_url or "").lower():
+            return False
+    except Exception:
+        return False
+    try:
+        return any(c.get("name") == "sessionid" and c.get("value")
+                   for c in (driver.get_cookies() or []))
+    except Exception:
+        return False
+
+
 def goto_login_screen(driver):
     driver.get(config.INSTAGRAM_LOGIN_URL)
 
@@ -257,20 +279,39 @@ def _on_instagram_page(driver):
         return False
 
 
-def _identity_from_api(driver):
-    """실행 계정의 정답 소스. 페이지 컨텍스트에서 인증 API 를 그대로 호출한다."""
+def _api_probe(driver):
+    """(ident|None, 이유문자열). 이유를 남기는 이유는 아래 주석 참고."""
     if not _on_instagram_page(driver):
-        return None
+        try:
+            where = (driver.current_url or "")[:60]
+        except Exception:
+            where = "?"
+        return None, f"off_instagram({where})"
     try:
         driver.set_script_timeout(12)
     except Exception:
         pass
     res = driver.execute_async_script(_CURRENT_USER_JS)
-    if not isinstance(res, dict) or res.get("error"):
-        return None
+    if not isinstance(res, dict):
+        return None, "no_result"
+    if res.get("error"):
+        return None, str(res["error"])[:60]
     if not res.get("id"):
-        return None
-    return {"user_id": str(res["id"]), "username": res.get("username") or None, "source": "api"}
+        return None, "no_id"
+    return ({"user_id": str(res["id"]), "username": res.get("username") or None,
+             "source": "api"}, "ok")
+
+
+def _identity_from_api(driver):
+    """실행 계정의 정답 소스. 페이지 컨텍스트에서 인증 API 를 그대로 호출한다.
+
+    고객 실환경(2026-08-03 08:55)에서 이 소스는 계속 `api=none` 이 나오고 전부 viewer 폴백으로
+    돌아간다. 왜 none 인지(302 리다이렉트인지, 4xx 인지, 인스타 페이지가 아니라서인지)는
+    지금까지 로그만으로 구별할 수 없었다. v1.6.0 부터 `identity_report` 가 그 **이유**까지
+    한 줄에 찍는다(`api=none(http_302_redirected)` 처럼). 추측 대신 다음 실행 로그로 판정한다.
+    """
+    ident, _reason = _api_probe(driver)
+    return ident
 
 
 def _identity_from_viewer(driver):
@@ -337,10 +378,18 @@ def identity_report(driver):
     v1.4.0 사고를 두고 '읽는 위치마다 다른 소스를 봐서 값이 갈렸다'는 가설이 있었다. 이걸
     추측으로 남기지 않기 위해, [시작] 때 세 소스를 동시에 찍는다. 다음 실행 로그 한 줄이면
     세 값이 실제로 일치하는지(=고객이 크롬에서 계정을 바꾼 것) 아닌지가 바로 판정된다.
+
+    v1.6.0: api 가 none 일 때 **왜** none 인지까지 같이 남긴다. 고객 환경에서는 계속 api=none
+    이었는데(=1순위 소스가 통째로 죽어 있다) 그 원인이 로그에 없어 추측만 가능했다.
     """
     out = []
-    for name, fn in (("api", _identity_from_api), ("viewer", _identity_from_viewer),
-                     ("cookie", _identity_from_cookie)):
+    try:
+        got, reason = _api_probe(driver)
+        out.append(f"api={got['user_id']}/{got.get('username') or '?'}" if got
+                   else f"api=none({reason})")
+    except Exception as e:
+        out.append(f"api=err({str(e)[:60]})")
+    for name, fn in (("viewer", _identity_from_viewer), ("cookie", _identity_from_cookie)):
         try:
             got = fn(driver)
         except Exception as e:

@@ -3,10 +3,17 @@
 
 화면 구성:
   1) 계정: 별명 드롭다운(저장된 별명 + 그 별명에 묶인 인스타 아이디) + [+ 새 별명]
-     + [로그인/계정 전환] + [로그아웃]. 로그인은 항상 실제로 뜬 크롬 창에서 사람이 직접
-     아이디/비번을 입력한다(프로그램은 로그인 여부만 감지). 별명마다 크롬 프로필이 갈린다.
-     크롬 창에서 인스타 자체 '계정 전환'을 써도 되고, 그때 실제로 어느 계정으로 도는지는
-     '현재 실행 계정' 줄에 항상 표시된다. v1.5.0 부터 계정이 달라졌다고 [시작] 을 막지 않는다.
+     + [계정 기록 지우기] + [로그인/계정 전환] + [로그아웃]. 로그인은 항상 실제로 뜬 크롬
+     창에서 사람이 직접 아이디/비번을 입력한다(프로그램은 로그인 여부만 감지). 별명마다
+     크롬 프로필이 갈린다. 크롬 창에서 인스타 자체 '계정 전환'을 써도 되고, 그때 실제로
+     어느 계정으로 도는지는 '현재 실행 계정' 줄에 항상 표시된다.
+
+     v1.6.0 규칙 두 가지(고객 1898680 이 다섯 번 리포트한 그 문제):
+       - **고객이 로그인한 계정에서 프로그램이 절대 끌어내지 않는다.** 별명에 저장된 계정과
+         크롬 창의 계정이 다르면 저장값을 고쳐 쓴다(브라우저를 고치지 않는다). 인스타 자체
+         계정 전환을 프로그램이 대신 눌러 주는 기능은 체크박스로 **꺼진 채** 제공된다.
+       - **[시작] 은 플래그가 아니라 살아 있는 크롬 창을 보고 판단한다.** 로그인 확인이 아직
+         돌고 있으면 '로그인하세요' 팝업 대신 기다렸다가 자동으로 시작한다.
   2) 엑셀 파일: [찾아보기] - C열(URL)/F열(DM 문구)만 읽는다.
   3) [시작] / [중지] / [진행상황 초기화]
   4) 로그 창(스크롤) + 진행 통계 라벨
@@ -48,6 +55,10 @@ class App:
         self.rows = []
         self.skipped_no_message = []
         self.logged_in = False
+        # 로그인 흐름이 지금 돌고 있는가. [시작] 이 '로그인 안 됨' 으로 오판하지 않으려면
+        # 이 상태를 알아야 한다(고객 실측: 로그인 확인이 28초 걸리는 동안 [시작] 을 눌렀다).
+        self._login_busy = False
+        self._start_pending = False
 
         self.account_var = tk.StringVar(value="default")
         self.live_var = tk.StringVar(value="현재 실행 계정: (로그인하면 표시됩니다)")
@@ -59,8 +70,10 @@ class App:
         self.status_var = tk.StringVar(value="상태: 로그인 필요")
         self.stats_var = tk.StringVar(value="완료 0 / 팔로우 0 / DM 0 / 실패 0")
         self.cap_var = tk.StringVar(value=str(settings.get_daily_cap()))
+        self.auto_switch_var = tk.BooleanVar(value=settings.get_auto_switch())
 
         self._build_ui()
+        self._migrate_legacy_bindings()
         self.updater_thread = updater.start_updater(
             stop_running_loop=self._stop_macro_silent, status_cb=self._log)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -90,13 +103,17 @@ class App:
         self.account_combo.grid(row=0, column=1, padx=6, pady=6)
         self.account_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_account_selected())
         ttk.Button(acc_frame, text="+ 새 별명", command=self.on_new_label_click).grid(row=0, column=2, padx=4)
+        # 별명에 잘못 저장된 계정(예: 'mugenboksa · @mightysun_09')을 고객이 직접 지울 수 있어야
+        # 한다. v1.5.0 에는 화면에 틀린 값이 보이는데 고칠 방법이 아예 없었다.
+        ttk.Button(acc_frame, text="계정 기록 지우기",
+                   command=self.on_forget_account_click).grid(row=0, column=3, padx=4)
         ttk.Radiobutton(acc_frame, text="빠른 방식(아이디/비번)", variable=self.engine_var,
-                        value="api", command=self._on_engine_change).grid(row=0, column=3, padx=6, sticky="w")
+                        value="api", command=self._on_engine_change).grid(row=0, column=4, padx=6, sticky="w")
         ttk.Radiobutton(acc_frame, text="크롬 창에서 직접 로그인", variable=self.engine_var,
-                        value="browser", command=self._on_engine_change).grid(row=0, column=4, padx=6, sticky="w")
+                        value="browser", command=self._on_engine_change).grid(row=0, column=5, padx=6, sticky="w")
 
         self.cred_frame = ttk.Frame(acc_frame)
-        self.cred_frame.grid(row=1, column=0, columnspan=5, sticky="w")
+        self.cred_frame.grid(row=1, column=0, columnspan=6, sticky="w")
         ttk.Label(self.cred_frame, text="아이디:").grid(row=0, column=0, padx=6, pady=4, sticky="w")
         ttk.Entry(self.cred_frame, textvariable=self.username_var, width=22).grid(row=0, column=1, padx=6)
         ttk.Label(self.cred_frame, text="비밀번호:").grid(row=0, column=2, padx=6, sticky="w")
@@ -107,11 +124,22 @@ class App:
         ttk.Button(acc_frame, text="로그인 / 계정 전환", command=self.on_login_click).grid(row=2, column=1, padx=6, pady=6)
         ttk.Button(acc_frame, text="다른 계정으로 로그인", command=self.on_switch_account_click).grid(row=2, column=2, padx=6)
         ttk.Button(acc_frame, text="로그아웃", command=self.on_logout_click).grid(row=2, column=3, padx=6)
-        ttk.Label(acc_frame, textvariable=self.status_var).grid(row=3, column=0, columnspan=5, padx=6, sticky="w")
+        # 기본은 꺼짐. 켠 사람만 프로그램이 인스타 자체 '계정 전환'을 대신 눌러 준다.
+        ttk.Checkbutton(acc_frame,
+                        text="별명에 기억된 계정으로 크롬을 자동 전환 (권장: 끔)",
+                        variable=self.auto_switch_var,
+                        command=self._on_auto_switch_change).grid(row=2, column=4, columnspan=2,
+                                                                  padx=6, sticky="w")
+        ttk.Label(acc_frame, textvariable=self.status_var).grid(row=3, column=0, columnspan=6, padx=6, sticky="w")
         # 크롬 창에서 인스타 자체 계정 전환을 해도 되고, 그때 프로그램이 어느 계정으로 도는지는
         # 항상 여기에 그대로 보인다(막지 않는다).
         self.live_label = ttk.Label(acc_frame, textvariable=self.live_var, foreground="#0b5cad")
-        self.live_label.grid(row=4, column=0, columnspan=5, padx=6, pady=(0, 6), sticky="w")
+        self.live_label.grid(row=4, column=0, columnspan=6, padx=6, pady=(0, 6), sticky="w")
+        ttk.Label(acc_frame,
+                  text="크롬 창에서 직접 로그인한 계정으로 그대로 실행됩니다. "
+                       "프로그램이 계정을 바꾸지 않습니다.",
+                  foreground="#555555").grid(row=5, column=0, columnspan=6, padx=6,
+                                             pady=(0, 6), sticky="w")
         self._on_engine_change()
         self._refresh_account_choices()
 
@@ -172,6 +200,45 @@ class App:
         except Exception:
             pass
 
+    def _on_auto_switch_change(self):
+        try:
+            on = settings.set_auto_switch(self.auto_switch_var.get())
+        except Exception:
+            return
+        self._log("크롬 자동 계정 전환을 " + ("켰습니다. 별명에 기억된 계정과 크롬 창의 계정이 "
+                                            "다르면 프로그램이 인스타 계정 전환을 대신 누릅니다."
+                                            if on else
+                                            "껐습니다(권장). 크롬 창에 로그인된 계정 그대로 실행합니다."))
+        bridge.remote_log("auto_switch_setting", f"on={on}", force=True)
+
+    def _migrate_legacy_bindings(self):
+        """v1.5.0 이전 로직이 만든 별명-계정 기록을 비운다. **조용히 지우지 않고 다 적는다.**
+
+        고객 화면에는 `mugenboksa · @mightysun_09` 처럼 틀린 값이 떠 있었다. 그 값은 v1.4.0 이
+        부모 세션의 계정을 그대로 별명에 묶어서 생긴 것이고, v1.5.0 은 그걸 정답으로 믿고
+        브라우저를 끌고 갔다. 업그레이드 시점에 한 번 비워야 여섯 번째 판이 안 열린다.
+        """
+        try:
+            import account_binding
+            reset = account_binding.migrate_legacy()
+        except Exception:
+            return
+        if not reset:
+            return
+        for item in reset:
+            self._log(f"[업그레이드] 별명 '{item['label']}' 에 저장돼 있던 계정 기록"
+                      f"(@{item['username'] or item['user_id'] or '?'})을 지웠습니다. "
+                      f"이전 버전이 잘못 저장했을 수 있는 값이라 다음 로그인 때 실제 계정으로 "
+                      f"다시 기억합니다.")
+        try:
+            bridge.remote_log(
+                "binding_migration_v2",
+                "reset=" + ";".join(f"{i['label']}->{i['username'] or '?'}/{i['user_id'] or '?'}"
+                                    for i in reset), force=True)
+        except Exception:
+            pass
+        self._refresh_account_choices()
+
     # ---------- 별명 목록(오타 방지) ----------
     def _current_label(self):
         """드롭다운에 보이는 표시 문자열('별명  ·  @아이디')에서 진짜 별명만 꺼낸다."""
@@ -201,12 +268,15 @@ class App:
                         key=lambda s: s.lower())
         displays, mapping = [], {}
         for label in labels:
-            who = (entries.get(label) or {}).get("username")
-            uid = (entries.get(label) or {}).get("user_id")
+            entry = entries.get(label) or {}
+            who = entry.get("username")
+            uid = entry.get("user_id")
             if who:
                 text = f"{label}  ·  @{who}"
             elif uid:
                 text = f"{label}  ·  (id {uid})"
+            elif entry.get("reset_from_username") or entry.get("reset_from_user_id"):
+                text = f"{label}  ·  (계정 기록 지움 - 로그인하면 다시 기억)"
             else:
                 text = f"{label}  ·  (아직 로그인 전)"
             displays.append(text)
@@ -228,9 +298,39 @@ class App:
     def _on_account_selected(self):
         label = self._current_label()
         if self.session_label and self.session_label != label:
-            self._log(f"'{label}' 로 실행하려면 [로그인 / 계정 전환] 을 눌러 그 계정으로 "
-                      "크롬 창을 맞춰 주세요. (그냥 [시작] 을 누르면 지금 크롬 창에 로그인된 "
-                      "계정으로 실행됩니다)")
+            self._log(f"'{label}' 별명의 크롬 창을 열려면 [로그인 / 계정 전환] 을 눌러 주세요. "
+                      "(지금 그대로 [시작] 을 누르면 열려 있는 크롬 창에 로그인된 계정으로 "
+                      "실행됩니다 - 프로그램이 계정을 바꾸지는 않습니다)")
+
+    def on_forget_account_click(self):
+        """이 별명에 저장된 '계정 기록'만 지운다. 로그인 세션/진행상황은 건드리지 않는다."""
+        label = self._current_label()
+        try:
+            import account_binding
+            entry = account_binding.get(label) or {}
+        except Exception:
+            entry = {}
+        shown = entry.get("username") or entry.get("user_id")
+        if not shown:
+            messagebox.showinfo("안내", f"'{label}' 에는 저장된 계정 기록이 없습니다.")
+            return
+        if not messagebox.askyesno(
+                "확인",
+                f"별명 '{label}' 에 저장된 계정 기록(@{shown})을 지울까요?\n\n"
+                "크롬 로그인과 진행상황은 그대로 두고, 프로그램이 기억하던 계정 이름만 지웁니다.\n"
+                "다음에 [로그인 / 계정 전환] 또는 [시작] 을 하면 그때 실제로 로그인된 계정으로 "
+                "다시 기억합니다."):
+            return
+        try:
+            old = account_binding.forget_account(label)
+        except Exception as e:
+            messagebox.showerror("오류", f"계정 기록을 지우지 못했습니다: {e}")
+            return
+        self._log(f"별명 '{label}' 의 계정 기록(@{(old or {}).get('username') or shown})을 지웠습니다.")
+        bridge.remote_log("binding_forgotten",
+                          f"account={label} was={(old or {}).get('username')}/"
+                          f"{(old or {}).get('user_id')}", force=True)
+        self._refresh_account_choices(select_label=label)
 
     def on_new_label_click(self):
         """새 별명 추가 - 기존 별명과 한두 글자만 다른 오타면 먼저 되묻는다."""
@@ -381,6 +481,29 @@ class App:
         self.root.after(0, _prompt)
 
     def _login_flow(self, label):
+        """로그인 흐름 한 겹 감싸기. 두 가지를 보장한다.
+
+        1) `_login_busy` 가 무슨 일이 있어도 내려간다. 안 그러면 [시작] 이 'pending' 으로 굳어
+           3분 기다렸다가 실패한다.
+        2) 예외가 나도 **조용히 죽지 않는다.** v1.5.0 까지는 이 스레드가 예외로 사라지면 화면에
+           아무 말도 없이 로그인 미완료 상태로 남았고, 고객은 [시작] 에서만 그 사실을 알았다.
+           이제는 로그에 남기고, [시작] 은 살아 있는 크롬 창을 직접 보고 판단한다.
+        """
+        self._login_busy = True
+        try:
+            self._login_flow_inner(label)
+        except Exception as e:
+            self._log(f"로그인 처리 중 오류: {e}")
+            self._set_status("상태: 로그인 확인 실패")
+            try:
+                bridge.remote_log("login_flow_error", f"account={label} err={str(e)[:300]}",
+                                  force=True)
+            except Exception:
+                pass
+        finally:
+            self._login_busy = False
+
+    def _login_flow_inner(self, label):
         import browser
         self._log(f"'{label}' 계정 프로필로 크롬을 엽니다...")
         self._set_status("상태: 브라우저 준비 중...")
@@ -402,9 +525,20 @@ class App:
         import account_binding
         import instagram_actions as ig
         if ig.is_logged_in(self.driver):
+            # **먼저** 실행 가능 상태로 만든다. v1.5.0 은 계정 판독/전환(고객 실측 28초)이 전부
+            # 끝난 뒤에야 이 값들을 채웠고, 그 사이에 [시작] 을 누른 고객은 "먼저 계정 로그인을
+            # 완료해 주세요" 팝업을 맞았다. 로그인된 창이 이미 있으면 그 순간부터 실행 가능이다.
+            self.session = self.driver
+            self.actions = ig
+            self.logged_in = True
+            self.session_label = label
+
             ident = ig.resolve_identity(self.driver)
             uid, who = ident.get("user_id"), ident.get("username")
-            bound = account_binding.get(label)
+            # check() 는 기록을 살아 있는 계정으로 **고쳐 쓴다.** 그러니 '체크박스를 켠 사람만'
+            # 쓰는 자동 전환이 무엇을 원했는지는 고치기 전에 미리 꺼내 둬야 한다.
+            # (이걸 안 하면 자동 전환은 언제나 want == 현재계정 이 되어 조용히 죽는다)
+            bound_before = account_binding.get(label) or {}
             verdict, detail = account_binding.check(label, uid, who)
             bridge.remote_log(
                 "login_identity",
@@ -412,53 +546,32 @@ class App:
                 force=True)
             if verdict == "unknown":
                 # 계정 id 자체를 못 읽었다 = 사실상 로그인 상태가 아니다. 새로 로그인 받는다.
+                self.logged_in = False
+                self.session = None
                 self._log("로그인 상태를 확인하지 못했습니다. 새로 로그인해 주세요.")
                 self._wait_manual_login(label, ig, account_binding)
                 return
 
-            if verdict == "mismatch":
-                # v1.4.0 은 여기서 세션을 지우고 강제 재로그인을 시켰다. 그런데 이 고객처럼
-                # 부모 계정 하나에 서브계정이 붙어 있으면, 고객이 크롬 창에서 인스타 자체
-                # 계정 전환을 쓴 정상 상황도 전부 '불일치'로 잡혀 로그인 -> 전환 -> 차단 ->
-                # 로그인 ... 무한 루프가 됐다(실측: start_blocked_uid_drift 반복).
-                # v1.5.0: 먼저 **원래 묶여 있던 계정으로 인스타 자체 전환**을 시도하고,
-                # 안 되면 지금 붙어 있는 계정을 그대로 인정하고 진행한다. 절대 막지 않는다.
-                want = (bound or {}).get("username")
-                if want:
-                    self._log(f"'{label}' 은 @{want} 로 기억돼 있습니다. 인스타 계정 전환을 시도합니다...")
-                    ok, sw_detail = ig.switch_to_account(self.driver, want, log=self._log)
-                    bridge.remote_log("login_switch_attempt",
-                                      f"account={label} want={want} ok={ok} detail={sw_detail[:300]}",
-                                      force=True)
-                    self._log(f"[계정 전환] {sw_detail}")
-                    if ok:
-                        ident = ig.resolve_identity(self.driver)
-                        uid, who = ident.get("user_id"), ident.get("username")
-                    else:
-                        self._switch_failure_dump(label, sw_detail)
-                if str((bound or {}).get("user_id") or "") != str(uid or ""):
-                    self._log(f"[안내] {detail}")
-                    self._log(f"이 별명은 지금 크롬 창에 로그인된 계정(@{who or uid})으로 실행됩니다. "
-                              f"다른 계정으로 바꾸시려면 크롬 창에서 인스타 계정 전환을 하시거나 "
-                              f"[다른 계정으로 로그인] 을 눌러주세요.")
-                    account_binding.bind(label, uid, who)
-                    bridge.remote_log("login_identity_adopted",
-                                      f"account={label} live_uid={uid} live_user={who} "
-                                      f"src={ident.get('source')}", force=True)
+            if verdict == "rebound":
+                # v1.5.0 은 여기서 **저장된 계정으로 브라우저를 되돌렸다**. 고객이 직접 로그인한
+                # 서브계정에서 부모 계정으로 끌려 나갔다(2026-08-04 실측, 고객이 눈으로 확인).
+                # v1.6.0: 살아 있는 계정이 이긴다. 브라우저는 건드리지 않고 기억만 고친다.
+                self._log(f"[안내] {detail}")
+                bridge.remote_log("login_binding_rewritten",
+                                  f"account={label} live_uid={uid} live_user={who} "
+                                  f"src={ident.get('source')}", force=True)
+            if self._maybe_auto_switch(label, "login", ig,
+                                       want=bound_before.get("username")):
+                ident = ig.resolve_identity(self.driver)
+                uid, who = ident.get("user_id"), ident.get("username")
 
-            # 여기서 session/actions 를 안 채우면 이전 별명의 (이미 종료된) 드라이버가 그대로
-            # 남아 매크로가 옛 계정/죽은 창으로 돌아간다 - 계정 전환이 안 되는 것처럼 보인다.
-            self.session = self.driver
-            self.actions = ig
-            self.logged_in = True
-            self.session_label = label
             self.session_user_id = uid
             self.session_username = who
             account_binding.bind(label, uid, who)
             self._set_live_account(ident)
             self._refresh_account_choices(select_label=label)
             self._log(f"'{label}' 프로필에 이미 로그인되어 있습니다"
-                      f"{f' (@{who})' if who else ''}.")
+                      f"{f' (@{who})' if who else ''}. 이 계정 그대로 실행됩니다.")
             self._set_status(f"상태: 로그인됨 ({label}{f' / @{who}' if who else ''})")
             bridge.remote_log("login_reused",
                               f"account={label} user={who} uid={uid} src={ident.get('source')}",
@@ -467,6 +580,46 @@ class App:
 
         ig.goto_login_screen(self.driver)
         self._wait_manual_login(label, ig, account_binding)
+
+    def _maybe_auto_switch(self, label, where, ig, want=None):
+        """체크박스를 **켠 경우에만** 인스타 자체 계정 전환을 대신 눌러 준다(기본 꺼짐).
+
+        기본이 꺼짐인 이유는 정직하게: 이 기능이 지금까지 실제로 증명한 효과는 고객을 자기가
+        로그인한 계정에서 끌어낸 것 하나뿐이다(2026-08-04 `login_switch_attempt ok=True` ->
+        고객: "크롬창에서는 강제로 A계정의 B아이디에서 A아이디로 변경되더라구요").
+
+        `want` 는 호출자가 **기록을 고쳐 쓰기 전에** 읽어 둔 별명의 저장 계정. 안 주면 지금
+        저장된 값을 읽는다. 반환값은 '실제로 전환에 성공했는가'.
+        """
+        try:
+            if not settings.get_auto_switch():
+                return False
+        except Exception:
+            return False
+        if want is None:
+            try:
+                import account_binding
+                want = (account_binding.get(label) or {}).get("username")
+            except Exception:
+                return False
+        driver = self.session or self.driver
+        if driver is None:
+            return False
+        try:
+            cur = ig.resolve_identity(driver)
+        except Exception:
+            return False
+        if not want or (cur.get("username") or "").lower() == str(want).lower():
+            return False
+        self._log(f"[자동 전환 켜짐] '{label}' 은 @{want} 로 기억돼 있어 인스타 계정 전환을 시도합니다...")
+        ok, detail = ig.switch_to_account(driver, want, log=self._log)
+        bridge.remote_log(f"{where}_switch_attempt",
+                          f"account={label} want={want} ok={ok} detail={detail[:300]}", force=True)
+        self._log(f"[계정 전환] {detail}")
+        if not ok:
+            self._switch_failure_dump(label, detail)
+            self._log("[안내] 전환하지 못했습니다. 크롬 창에 로그인된 계정 그대로 진행합니다.")
+        return ok
 
     def _switch_failure_dump(self, label, detail):
         """계정 전환 UI 를 못 찾았을 때 화면 DOM 을 통째로 올린다.
@@ -555,13 +708,92 @@ class App:
                    f"F열 비어 스킵 {len(self.skipped_no_message)}행")
 
     # ---------- 실행 ----------
+    # [시작] 이 '로그인 됐나'를 판단하는 기준은 **살아 있는 크롬 창**이지 self.logged_in 플래그가
+    # 아니다. v1.5.0 은 플래그 하나만 봤고, 그 플래그는 로그인 흐름이 계정 판독/전환을 다 끝낸
+    # 뒤에야 켜졌다. 고객 실측(2026-08-04):
+    #     09:07:34 크롬 엽니다 ... 09:07:45 엑셀 로드 ... 09:08:02 로그인되어 있습니다
+    # 그 사이(약 28초)에 [시작] 을 누르면 화면에는 '로그인됨'이 떠 있는데도 "먼저 계정 로그인을
+    # 완료해 주세요" 팝업이 났다. 아래 세 상태를 구분해 각각 다르게 처리한다.
+    #   ready   - 지금 바로 실행 가능
+    #   pending - 로그인 흐름이 아직 돌고 있다 -> **팝업 대신 기다렸다가 자동 시작**
+    #   none    - 크롬 창 자체가 없다/로그인 안 됨 -> 그때만 안내 팝업
+    START_WAIT_POLL_MS = 1000
+    START_WAIT_MAX_POLLS = 180          # 최대 3분까지 기다렸다가 자동 시작
+
+    def _start_readiness(self):
+        """(상태, 설명). 플래그가 아니라 지금 살아 있는 상태에서 유도한다."""
+        if self.session is not None and self.logged_in:
+            return "ready", "session"
+        if self.engine_var.get() == "api":
+            # 빠른 방식은 브라우저가 없어 창을 들여다볼 수 없다. 진행 중이면 기다린다.
+            return ("pending", "api_login") if self._login_busy else ("none", "api_no_session")
+        if self.driver is None:
+            return ("pending", "browser_starting") if self._login_busy else ("none", "no_browser")
+        if self._login_busy:
+            # 로그인 스레드가 같은 드라이버로 명령을 보내는 중이다. 끼어들지 말고 기다린다.
+            return "pending", "login_running"
+        import instagram_actions as ig
+        try:
+            live = ig.session_is_live(self.driver)
+        except Exception:
+            # 창을 들여다볼 수 없다(창이 죽었다). 그건 '로그인 안 됨' 이 맞다.
+            return "none", "window_unreadable"
+        if not live:
+            return "none", "window_not_logged_in"
+
+        # 창은 로그인돼 있는데 플래그만 안 켜져 있다(로그인 스레드가 중간에 죽었거나 예외로
+        # 빠져나간 경우). 플래그를 창 기준으로 맞추고 그대로 실행한다.
+        # 아래 부수 작업(로그/라벨)이 실패해도 실행 가능 판정은 취소되지 않는다. 여기를 통째로
+        # try 로 감싸면 사소한 예외가 다시 '로그인하세요' 팝업으로 둔갑한다.
+        self.session = self.driver
+        self.actions = ig
+        self.logged_in = True
+        try:
+            self.session_label = self._current_label()
+            self._log("[안내] 크롬 창이 이미 로그인 상태라 그대로 실행합니다.")
+            bridge.remote_log("start_session_adopted",
+                              f"account={self.session_label}", force=True)
+        except Exception:
+            pass
+        return "ready", "adopted_live_window"
+
     def on_start_click(self):
         if self.engine is not None and self.engine.is_alive():
             messagebox.showinfo("안내", "이미 실행 중입니다.")
             return
-        if self.session is None or not self.logged_in:
-            messagebox.showerror("오류", "먼저 계정 로그인을 완료해 주세요.")
+        self._start_pending = True
+        self._attempt_start(0)
+
+    def _attempt_start(self, polls):
+        if not self._start_pending:
             return
+        state, why = self._start_readiness()
+        if state == "pending":
+            if polls == 0:
+                self._log("로그인 확인이 끝나는 대로 자동으로 시작합니다. 잠시만 기다려 주세요.")
+            if polls < self.START_WAIT_MAX_POLLS:
+                self._set_status("상태: 로그인 확인 중... (끝나면 자동으로 시작합니다)")
+                try:
+                    self.root.after(self.START_WAIT_POLL_MS,
+                                    lambda: self._attempt_start(polls + 1))
+                    return
+                except Exception:
+                    pass
+            self._start_pending = False
+            bridge.remote_log("start_wait_timeout", f"why={why} polls={polls}", force=True)
+            messagebox.showerror("오류", "로그인 확인이 끝나지 않았습니다. "
+                                         "[로그인 / 계정 전환] 을 다시 눌러 주세요.")
+            return
+        if state == "none":
+            self._start_pending = False
+            bridge.remote_log("start_no_session", f"why={why}", force=True)
+            messagebox.showerror("오류", "먼저 [로그인 / 계정 전환] 을 눌러 크롬 창에서 "
+                                         "인스타그램에 로그인해 주세요.")
+            return
+        self._start_pending = False
+        self._begin_run()
+
+    def _begin_run(self):
         if not self.rows:
             self.on_load_click()
         if not self.rows:
@@ -587,9 +819,14 @@ class App:
         쓰는 것이 정상 사용법이다. 그 정상 동작이 전부 차단으로 이어져 프로그램을 쓸 수 없었다
         (실측: start_blocked_uid_drift 3회 반복 + 재로그인 루프).
 
-        v1.5.0 원칙:
+        v1.5.0 은 '막지 않는다' 는 지켰지만 여기서 **브라우저를 저장값 쪽으로 끌고 갔다.**
+        고객이 눈으로 본 그대로: "크롬창에서는 강제로 A계정의 B아이디에서 A아이디로 변경되더라구요".
+        고객이 직접 로그인해 둔 서브계정에서 [시작] 을 누르는 순간 부모 계정으로 튕겨 나간 것이다.
+
+        v1.6.0 원칙:
           - **절대 막지 않는다.** 팔로우/DM 이 실행되는 그 계정이 정답이고, 프로그램은 따라간다.
-          - 별명에 묶인 계정과 다르면 먼저 인스타 자체 전환을 한 번 시도한다(실패해도 진행).
+          - **절대 브라우저 계정을 바꾸지 않는다.** 저장값이 다르면 저장값을 고쳐 쓴다.
+            (체크박스로 자동 전환을 켠 사람만 예외 - 기본은 꺼짐)
           - 무엇으로 도는지는 화면(현재 실행 계정) + 진단 로그에 항상 남긴다.
           - 진행상황/하루 상한은 별명이 아니라 **실제 계정 id** 로 센다(오타 별명 2개가 같은
             계정을 가리켜도 이미 DM 보낸 사람에게 다시 보내지 않는다).
@@ -618,24 +855,20 @@ class App:
         bound = account_binding.get(label) or {}
         want_id, want_user = bound.get("user_id"), bound.get("username")
         if want_id and str(want_id) != str(uid):
-            self._log(f"[안내] '{label}' 은 @{want_user or want_id} 로 기억돼 있는데 크롬 창은 "
-                      f"@{who or uid} 로 로그인돼 있습니다. 인스타 계정 전환을 시도합니다...")
-            ok, detail = ig.switch_to_account(self.session, want_user, log=self._log)
-            bridge.remote_log("start_switch_attempt",
-                              f"account={label} want={want_user} ok={ok} detail={detail[:300]}",
-                              force=True)
-            self._log(f"[계정 전환] {detail}")
-            if ok:
-                ident = ig.resolve_identity(self.session)
-                uid, who = ident.get("user_id"), ident.get("username")
-            else:
-                self._switch_failure_dump(label, detail)
-                self._log(f"[안내] 전환하지 못했습니다. 지금 크롬 창의 계정(@{who or uid})으로 "
-                          "그대로 진행합니다. 다른 계정으로 돌리시려면 크롬 창에서 인스타 "
-                          "계정 전환을 하신 뒤 다시 [시작] 을 눌러주세요.")
-                bridge.remote_log("start_identity_adopted",
-                                  f"account={label} bound={want_id} live={uid} live_user={who} "
-                                  f"src={ident.get('source')}", force=True)
+            # 여기가 고객을 다섯 번째로 막은 자리다. v1.5.0 은 이 지점에서 switch_to_account 를
+            # 불러 크롬을 저장값 계정으로 되돌렸다. v1.6.0 은 저장값을 고친다.
+            self._log(f"[안내] '{label}' 에 기억돼 있던 계정은 @{want_user or want_id} 였는데 "
+                      f"크롬 창은 @{who or uid} 로 로그인돼 있습니다. "
+                      f"지금 로그인된 계정(@{who or uid})으로 실행하고, 별명 기억을 그 계정으로 "
+                      f"고쳐 둡니다. 크롬 창의 계정은 바꾸지 않습니다.")
+            bridge.remote_log("start_binding_rewritten",
+                              f"account={label} bound={want_id}/{want_user} live={uid}/{who} "
+                              f"src={ident.get('source')}", force=True)
+
+        # 체크박스를 켠 사람만: 저장값 계정으로 인스타 자체 전환을 대신 눌러 준다(기본 꺼짐).
+        if self._maybe_auto_switch(label, "start", ig, want=want_user):
+            ident = ig.resolve_identity(self.session)
+            uid, who = ident.get("user_id"), ident.get("username")
 
         # 별명은 항상 '지금 실제로 도는 계정' 으로 다시 묶는다(다음에 열었을 때 그대로 보이게).
         account_binding.bind(label, uid, who)

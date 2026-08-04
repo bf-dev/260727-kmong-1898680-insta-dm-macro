@@ -9,12 +9,15 @@
     04:57:58 [login_ok]     account=xxtwinklebeamxx user=xxtwinklebeamxx
 
 여기서 검증하는 것:
-  1) 별명 -> 실제 계정(ds_user_id) 매핑이 저장되고, 재사용 시 불일치면 강제 재로그인 신호가 난다.
-  2) 아직 매핑이 없어도, 그 계정이 이미 '다른 별명' 것이면 불일치로 본다(= 이전 세션 물려받음).
+  1) 별명 -> 실제 계정(ds_user_id) 매핑이 저장된다.
+  2) v1.6.0: 저장값과 살아 있는 계정이 다르면 **살아 있는 계정이 이기고 저장값이 고쳐진다.**
+     (v1.5.0 은 여기서 'mismatch' 를 내고 브라우저를 저장값 쪽으로 되돌려 고객을 자기가
+      로그인한 서브계정에서 끌어냈다 - 2026-08-04 실측)
   3) `config.profile_dir_for()` 는 어떤 별명 조합에서도 폴더가 겹치지 않는다
      (이전 세션들이 "겹친다/안 겹친다"로 엇갈렸던 부분을 실제로 확인해서 못 박는다).
 """
 
+import json
 import os
 import shutil
 import tempfile
@@ -77,21 +80,37 @@ class BindingTest(unittest.TestCase):
         verdict, _ = account_binding.check("mightysun_09", "111", "mightysun_09")
         self.assertEqual(verdict, "ok")
 
-    def test_wrong_account_on_a_bound_label_is_a_mismatch(self):
-        """고객 로그의 정확한 사고: 별명 mightyjimin 인데 세션은 mightysun_09."""
-        account_binding.bind("mightyjimin", "222", "mightyjimin")
-        verdict, detail = account_binding.check("mightyjimin", "111", "mightysun_09")
-        self.assertEqual(verdict, "mismatch")
-        self.assertIn("mightysun_09", detail)
+    def test_live_account_wins_over_a_stale_binding(self):
+        """v1.6.0 의 핵심 뒤집기.
 
-    def test_unbound_label_holding_another_labels_session_is_a_mismatch(self):
-        """새 별명인데 이전 별명의 세션을 그대로 물려받은 경우 - 여기가 진짜 위험 지점."""
+        v1.5.0 까지 이 상황은 'mismatch' 였고, 호출자는 그걸 근거로 **브라우저를 저장값 쪽으로
+        되돌렸다.** 고객이 직접 로그인한 서브계정에서 부모 계정으로 끌려 나간 실제 사고
+        (2026-08-04 `login_switch_attempt want=mightysun_09 ok=True`)가 그것이다.
+        이제는 살아 있는 계정이 이기고, 저장값이 고쳐진다.
+        """
+        account_binding.bind("mugenboksa", "67584782851", "mightysun_09")   # 오염된 기록
+        verdict, detail = account_binding.check("mugenboksa", "42105781019", "mugenboksa")
+        self.assertEqual(verdict, "rebound")
+        self.assertIn("mugenboksa", detail)
+        self.assertEqual(account_binding.get("mugenboksa")["user_id"], "42105781019",
+                         "살아 있는 계정으로 기록이 고쳐져야 한다")
+        self.assertEqual(account_binding.get("mugenboksa")["username"], "mugenboksa")
+
+    def test_unbound_label_holding_another_labels_session_is_recorded_not_refused(self):
+        """새 별명인데 이전 별명의 세션을 그대로 물려받은 경우.
+
+        v1.5.0 은 여기서도 'mismatch' 를 내서 강제 재로그인을 유도했다. 그런데 이 고객은 부모
+        계정 하나에 서브계정이 붙어 있어 같은 계정이 두 별명에 보이는 상황이 정상이다. 중복 DM
+        은 진행상황 키(acct:<uid>)가 막으므로, 기록만 하고 막지 않는다.
+        """
         account_binding.bind("mightysun_09", "111", "mightysun_09")
         verdict, detail = account_binding.check("mightyjimin", "111", "mightysun_09")
-        self.assertEqual(verdict, "mismatch")
+        self.assertEqual(verdict, "bound")
         self.assertIn("mightysun_09", detail)
-        self.assertIsNone(account_binding.get("mightyjimin"),
-                          "불일치일 때 새 별명을 그 계정으로 묶어버리면 안 된다")
+        self.assertEqual(account_binding.get("mightyjimin")["user_id"], "111")
+        self.assertEqual(account_binding.run_key("111", "mightyjimin"),
+                         account_binding.run_key("111", "mightysun_09"),
+                         "같은 계정이면 별명이 달라도 진행상황 키가 같아야 중복 DM 이 안 간다")
 
     def test_no_user_id_means_unknown_not_ok(self):
         verdict, _ = account_binding.check("x", None, None)
@@ -108,6 +127,68 @@ class BindingTest(unittest.TestCase):
         account_binding.unbind("a")
         self.assertIsNone(account_binding.get("a"))
         self.assertEqual(account_binding.check("a", "999", "other")[0], "bound")
+
+
+class LegacyBindingMigrationTest(unittest.TestCase):
+    """업그레이드 때 v1.5.0 이전 기록의 '계정' 만 비운다(별명은 남긴다).
+
+    고객 1898680 의 오염된 기록은 v1.4.0 이 만들었다(2026-08-03 05:17:29
+    `login_ok account=mugenboksa user=mightysun_09 uid=67584782851`). 그 기록이 v1.5.0 으로
+    그대로 넘어와 다섯 번째 판을 열었다. 여섯 번째 판이 안 열리려면 업그레이드 시점에 낫는다.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._old = config.ACCOUNT_BINDINGS_FILE
+        config.ACCOUNT_BINDINGS_FILE = os.path.join(self.dir, "account_bindings.json")
+
+    def tearDown(self):
+        config.ACCOUNT_BINDINGS_FILE = self._old
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _write_legacy(self, entries):
+        with open(config.ACCOUNT_BINDINGS_FILE, "w", encoding="utf-8") as fh:
+            json.dump(entries, fh)
+
+    def test_the_customers_poisoned_entry_is_reset_and_reported(self):
+        self._write_legacy({"mugenboksa": {"user_id": "67584782851",
+                                           "username": "mightysun_09", "bound_at": 1}})
+        reset = account_binding.migrate_legacy()
+        self.assertEqual([r["label"] for r in reset], ["mugenboksa"])
+        self.assertEqual(reset[0]["username"], "mightysun_09",
+                         "무엇을 지웠는지 화면/로그에 남길 수 있어야 한다(조용히 지우지 않는다)")
+        entry = account_binding.get("mugenboksa")
+        self.assertEqual(entry["user_id"], "")
+        self.assertEqual(entry["reset_from_username"], "mightysun_09")
+
+    def test_the_label_itself_survives_the_migration(self):
+        self._write_legacy({"mugenboksa": {"user_id": "1", "username": "x"}})
+        account_binding.migrate_legacy()
+        self.assertIn("mugenboksa", account_binding.labels(),
+                      "별명까지 사라지면 고객에게는 '계정이 통째로 없어진' 것으로 보인다")
+
+    def test_migration_is_idempotent(self):
+        self._write_legacy({"a": {"user_id": "1", "username": "x"}})
+        self.assertEqual(len(account_binding.migrate_legacy()), 1)
+        account_binding.bind("a", "9", "live")            # 재로그인으로 다시 채움
+        self.assertEqual(account_binding.migrate_legacy(), [],
+                         "두 번째 실행이 새로 채워진 값을 또 지우면 안 된다")
+        self.assertEqual(account_binding.get("a")["user_id"], "9")
+
+    def test_a_v2_binding_is_left_alone(self):
+        account_binding.bind("a", "111", "n")
+        self.assertEqual(account_binding.migrate_legacy(), [])
+        self.assertEqual(account_binding.get("a")["user_id"], "111")
+
+    def test_forget_account_clears_the_account_but_keeps_the_label(self):
+        account_binding.bind("mugenboksa", "67584782851", "mightysun_09")
+        old = account_binding.forget_account("mugenboksa")
+        self.assertEqual(old["username"], "mightysun_09")
+        self.assertIn("mugenboksa", account_binding.labels())
+        self.assertEqual(account_binding.get("mugenboksa")["user_id"], "")
+        # 지운 뒤 첫 로그인은 'bound'(새로 기억함) 여야 한다 - 'rebound' 경고가 아니라.
+        self.assertEqual(account_binding.check("mugenboksa", "42105781019", "mugenboksa")[0],
+                         "bound")
 
 
 class _CookieDriver:
