@@ -992,7 +992,9 @@ def _run_guidemo(root, app):
     app.stats_var.set(f"완료 {len(rows)} / 팔로우 {followed} / DM {dm_sent} / 실패 0")
     app._log(f"[데모] 완료: F열 없어 스킵 {len(skipped)}행")
 
-    # v1.5.0 에서 고친 것들을 이 창에서 그대로 실행해 보여준다(CI 스크린샷 증거).
+    # v1.6.0 에서 고친 것들을 이 창에서 **실제 코드로** 실행해 보여준다(CI 스크린샷 증거).
+    # 고객이 다섯 번 리포트한 두 가지를 그대로 재현한다: (1) [시작] 이 로그인을 못 알아본다,
+    # (2) 별명에 잘못 저장된 계정이 크롬 창을 다른 계정으로 끌고 간다.
     try:
         import account_binding
         import instagram_actions as ig
@@ -1008,28 +1010,48 @@ def _run_guidemo(root, app):
             def execute_script(self, *_a, **_k):
                 return None
             def get_cookies(self):
-                return [{"name": "ds_user_id", "value": "67584782851"}]
+                return [{"name": "sessionid", "value": "demo"},
+                        {"name": "ds_user_id", "value": "67584782851"}]
             def find_elements(self, *_a, **_k):
                 return []
 
-        app._log(f"[v1.5.0 확인] 팔로우 버튼 판정: "
+        app._log(f"[v1.6.0 확인] 팔로우 버튼 판정: "
                  f"'맞팔로우'->{ig.classify_follow_text('맞팔로우')}, "
                  f"'팔로잉'->{ig.classify_follow_text('팔로잉')}, "
                  f"'팔로우 취소'->{ig.classify_follow_text('팔로우 취소')}")
-        ident = ig.resolve_identity(_DriftDriver("42105781019", "mugenboksa"))
-        app._log(f"[v1.5.0 확인] 실행 계정 판독(단일 소스): {ig.identity_str(ident)} "
+        drift = _DriftDriver("42105781019", "mugenboksa")
+        ident = ig.resolve_identity(drift)
+        app._log(f"[v1.6.0 확인] 실행 계정 판독(단일 소스): {ig.identity_str(ident)} "
                  f"- 쿠키(ds_user_id=67584782851)가 아니라 실제 실행 계정을 따른다")
         app._set_live_account(ident)
-        app._log("[v1.5.0 확인] 계정이 달라져도 [시작] 을 막지 않는다 "
-                 "(v1.4.0 의 '계정 확인 필요' 차단 팝업 제거, 화면 표시 + 진단 기록으로 대체)")
-        account_binding.bind("__demo__", "42105781019", "mugenboksa")
-        app._log(f"[v1.5.0 확인] 진행상황 키: 별명이 아니라 계정 기준 "
+
+        # (1) [시작] 준비 판정: 플래그가 아니라 살아 있는 크롬 창을 보고 판단한다.
+        saved = (app.driver, app.session, app.logged_in)
+        app.driver, app.session, app.logged_in = drift, None, False
+        state, why = app._start_readiness()
+        app.driver, app.session, app.logged_in = saved
+        app._log(f"[v1.6.0 확인] 로그인 플래그가 꺼져 있어도 크롬 창이 로그인 상태면 "
+                 f"[시작] 준비 판정 = {state}({why}) - v1.5.0 은 여기서 "
+                 f"'먼저 계정 로그인을 완료해 주세요' 팝업을 띄웠다")
+
+        # (2) 오염된 바인딩: 살아 있는 계정이 이기고 저장값이 고쳐진다(브라우저는 그대로).
+        account_binding.bind("__demo__", "67584782851", "mightysun_09")   # 고객의 오염된 기록
+        verdict, detail = account_binding.check("__demo__", "42105781019", "mugenboksa")
+        app._log(f"[v1.6.0 확인] 저장값(@mightysun_09) vs 크롬 창(@mugenboksa) -> "
+                 f"판정 '{verdict}': 저장값이 @"
+                 f"{account_binding.get('__demo__')['username']} 로 고쳐졌다. "
+                 f"크롬 창의 계정은 바꾸지 않는다(자동 전환 기본값 = "
+                 f"{'켬' if settings.get_auto_switch() else '끔'})")
+        app._log(f"[v1.6.0 확인] 진행상황 키: 별명이 아니라 계정 기준 "
                  f"'{account_binding.run_key('42105781019', '__demo__')}' "
                  f"(오타 별명 2개가 같은 계정이어도 중복 DM 안 감)")
+        forgotten = account_binding.forget_account("__demo__")
+        app._log(f"[v1.6.0 확인] [계정 기록 지우기]: @{forgotten['username']} 기록을 지우고 "
+                 f"별명은 남긴다(고객이 화면에서 직접 고칠 수 있다)")
         account_binding.unbind("__demo__")
-        app._log(f"[v1.5.0 확인] 자동 업데이트 대상 경로(sys.executable): {updater.target_exe_path()}")
+        app._log(f"[v1.6.0 확인] 자동 업데이트 대상 경로(sys.executable): {updater.target_exe_path()}")
     except Exception as e:
-        app._log(f"[v1.5.0 확인] 실행 중 오류: {e}")
+        app._log(f"[v1.6.0 확인] 실행 중 오류: {e}")
 
     hold_ms = int(os.environ.get("DIAG_HOLD_MS", "6000"))
     root.lift()
