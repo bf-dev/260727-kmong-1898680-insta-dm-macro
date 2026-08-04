@@ -136,16 +136,20 @@ def case_unrecoverable_failure_still_records_a_reason():
             print("OK[B]: 실패 시 마커가 남아 앱이 사유를 보고할 수 있습니다")
 
         # 앱이 그 결과를 실제로 읽어 진단으로 올리는지까지 확인한다.
-        keep_result, keep_state = updater._RESULT_PATH, updater._STATE_PATH
+        # 마커/결과/흔적 파일을 전부 이 테스트 폴더로 돌려놓는다. _TRAIL_PATH 를 빼먹으면
+        # 러너의 진짜 update_trail.log 에 가짜 FAIL 줄이 쌓이고, 그 뒤 빌드한 exe 가 그걸
+        # 고객 customerKey 로 업로드한다(2026-08-04 에 실제로 그랬다).
+        keep = (updater._RESULT_PATH, updater._STATE_PATH, updater._TRAIL_PATH,
+                updater.remote_log)
         updater._RESULT_PATH, updater._STATE_PATH = result_path, state_path
+        updater._TRAIL_PATH = os.path.join(os.path.dirname(state_path), "update_trail.log")
         sent = []
-        keep_log = updater.remote_log
         updater.remote_log = lambda e, d="", **k: sent.append((e, d))
         try:
             updater._report_previous_swap()
         finally:
-            updater.remote_log = keep_log
-            updater._RESULT_PATH, updater._STATE_PATH = keep_result, keep_state
+            (updater._RESULT_PATH, updater._STATE_PATH, updater._TRAIL_PATH,
+             updater.remote_log) = keep
         if not sent or sent[0][0] != "update_swap_failed":
             print(f"FAIL[B]: 앱이 실패를 보고하지 않았습니다: {sent}")
             ok = False
