@@ -420,11 +420,7 @@ def failure_reason(latest):
     recorded = str(state.get("last_error") or "").strip()
     counters = (f"시도={state.get('attempts', 0)} 하드실패={state.get('fail_count', 0)} "
                 f"중단={state.get('interrupted', 0)} 단계={state.get('phase') or '없음'}")
-    if recorded:
-        head = recorded
-    else:
-        head = ("기록된 예외 없음(마커에 사유가 없다) - 지금 실측한 환경으로 대신 보고: "
-                + counters)
+    head = recorded or "기록된 예외 없음(마커에 사유가 없다) - 지금 실측한 환경으로 대신 보고"
     probe = _environment_probe()
     reason = f"{head} | {counters} | 실측: {probe}"
     return reason.strip() or f"사유 산출 실패(코드 결함) | {counters}"

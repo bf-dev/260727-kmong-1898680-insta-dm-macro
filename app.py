@@ -2,6 +2,10 @@
 """인스타 DM 매크로 - Tkinter GUI.
 
 화면 구성:
+  0) 버전/업데이트 줄: 지금 버전 + [지금 업데이트] + [다운로드 주소 복사]. 자동 교체가
+     막히면 이 줄이 노란 경고로 바뀌고 사유와 수동 다운로드 주소를 그대로 보여 준다.
+     (v1.7.0. 고객 1898680 이 두 번 - 1.3.1, 1.5.0 - 옛 버전에 '조용히' 묶였다.
+      막힌 사실이 화면에 보이지 않는 상태를 없애는 것이 이 줄의 목적이다.)
   1) 계정: 별명 드롭다운(저장된 별명 + 그 별명에 묶인 인스타 아이디) + [+ 새 별명]
      + [계정 기록 지우기] + [로그인/계정 전환] + [로그아웃]. 로그인은 항상 실제로 뜬 크롬
      창에서 사람이 직접 아이디/비번을 입력한다(프로그램은 로그인 여부만 감지). 별명마다
@@ -71,11 +75,19 @@ class App:
         self.stats_var = tk.StringVar(value="완료 0 / 팔로우 0 / DM 0 / 실패 0")
         self.cap_var = tk.StringVar(value=str(settings.get_daily_cap()))
         self.auto_switch_var = tk.BooleanVar(value=settings.get_auto_switch())
+        # v1.7.0: 자동 업데이트가 막힌 것을 고객이 **볼 수 있어야** 한다. 고객 1898680 은
+        # 두 번(1.3.1, 1.5.0) 옛 버전에 조용히 묶인 채로 계속 썼다. 이 줄은 항상 보이고,
+        # 막히면 색이 바뀌며 수동 다운로드 주소를 같이 준다.
+        self.update_var = tk.StringVar(
+            value=f"프로그램 버전 v{config.APP_VERSION} (자동 업데이트 켜짐)")
+        self._update_url = config.MANUAL_DOWNLOAD_URL
+        self._update_reason = ""
 
         self._build_ui()
         self._migrate_legacy_bindings()
         self.updater_thread = updater.start_updater(
-            stop_running_loop=self._stop_macro_silent, status_cb=self._log)
+            stop_running_loop=self._stop_macro_silent, status_cb=self._log,
+            blocked_cb=self._on_update_blocked, pre_swap_cb=self._quit_browser_for_swap)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _on_close(self):
@@ -91,6 +103,19 @@ class App:
     # ---------- UI ----------
     def _build_ui(self):
         pad = {"padx": 8, "pady": 6}
+
+        # 0) 버전/업데이트 줄. 평소엔 현재 버전만 조용히 보여 주고, 자동 교체가 막히면
+        # 노란 경고로 바뀌며 [지금 업데이트] 와 다운로드 주소를 내민다.
+        self.update_frame = tk.Frame(self.root, bg="#f4f6f8")
+        self.update_frame.pack(fill="x", padx=8, pady=(8, 0))
+        self.update_label = tk.Label(self.update_frame, textvariable=self.update_var,
+                                     bg="#f4f6f8", fg="#333333", anchor="w",
+                                     justify="left", wraplength=760)
+        self.update_label.pack(side="left", padx=8, pady=6, fill="x", expand=True)
+        ttk.Button(self.update_frame, text="지금 업데이트",
+                   command=self.on_update_now_click).pack(side="right", padx=4, pady=4)
+        ttk.Button(self.update_frame, text="다운로드 주소 복사",
+                   command=self.on_copy_update_url_click).pack(side="right", padx=4, pady=4)
 
         acc_frame = ttk.LabelFrame(self.root, text="1) 인스타그램 계정")
         acc_frame.pack(fill="x", **pad)
@@ -183,6 +208,108 @@ class App:
             self.root.after(0, lambda: self.status_var.set(text))
         except Exception:
             pass
+
+    # ---------- 자동 업데이트 (v1.7.0) ----------
+    def _set_update_banner(self, text, warn=False, url=None):
+        """버전 줄을 갱신한다. warn 이면 노란 경고로 바꿔 눈에 띄게 만든다."""
+        if url:
+            self._update_url = url
+
+        def _do():
+            try:
+                self.update_var.set(text)
+                bg = "#fff4d6" if warn else "#f4f6f8"
+                fg = "#8a5a00" if warn else "#333333"
+                self.update_frame.configure(bg=bg)
+                self.update_label.configure(bg=bg, fg=fg)
+            except Exception:
+                pass
+        try:
+            self.root.after(0, _do)
+        except Exception:
+            pass
+
+    def _on_update_blocked(self, latest, reason, url):
+        """업데이터가 '자동 교체가 막혔다' 고 알려 올 때. 화면에서 절대 숨기지 않는다."""
+        self._update_reason = reason or ""
+        self._set_update_banner(
+            f"자동 업데이트가 막혀 있습니다. 새 버전 v{latest} 이(가) 나왔지만 이 PC 에서 "
+            f"교체되지 않았습니다(지금은 v{config.APP_VERSION}). [지금 업데이트] 를 누르거나 "
+            f"아래 주소를 브라우저에 붙여 넣어 직접 받아 주세요:\n{url}",
+            warn=True, url=url)
+        self._log(f"[자동 업데이트] 막힘 사유: {reason}")
+
+    def _quit_browser_for_swap(self):
+        """exe 교체 직전에 크롬/드라이버를 정리한다.
+
+        살아 있는 chromedriver 나 크롬 자식 프로세스가 프로그램 폴더를 붙잡고 있으면
+        교체 스크립트의 rename/move 가 막힐 수 있다. 어차피 곧 재시작하므로 먼저 닫는다.
+        """
+        try:
+            if self.engine:
+                self.engine.stop()
+        except Exception:
+            pass
+        try:
+            if self.driver:
+                self.driver.quit()
+        except Exception:
+            pass
+        self.driver = None
+        self.session = None
+
+    def on_update_now_click(self):
+        """[지금 업데이트] - 백오프를 무시하고 즉시 확인/교체를 시도한다."""
+        self._log("[자동 업데이트] 지금 확인합니다...")
+        self._set_update_banner("업데이트를 확인하는 중입니다...", warn=False)
+        try:
+            self.updater_thread.check_now(done_cb=self._on_update_now_result)
+        except Exception as e:
+            messagebox.showerror("자동 업데이트", f"업데이트 확인을 시작하지 못했습니다: {e}")
+
+    def _on_update_now_result(self, result):
+        result = result or {}
+        status = result.get("status")
+        detail = str(result.get("detail") or "")
+        url = result.get("download_url") or self._update_url
+
+        def _do():
+            if status == "up_to_date":
+                self._set_update_banner(
+                    f"프로그램 버전 v{config.APP_VERSION} (최신입니다)", warn=False)
+                messagebox.showinfo("자동 업데이트", detail or "이미 최신 버전입니다.")
+                return
+            if status == "busy":
+                messagebox.showinfo("자동 업데이트", detail)
+                return
+            # blocked / failed / error / dev - 전부 사유를 그대로 보여 준다.
+            self._update_reason = detail
+            self._set_update_banner(
+                f"자동 업데이트가 되지 않았습니다. 아래 주소에서 직접 받아 주세요:\n{url}",
+                warn=True, url=url)
+            self._log(f"[자동 업데이트] 실패 사유: {detail}")
+            messagebox.showwarning(
+                "자동 업데이트",
+                f"이 PC 에서 자동 교체가 되지 않았습니다.\n\n"
+                f"아래 주소를 브라우저에 붙여 넣어 새 파일을 받은 뒤,\n"
+                f"압축을 풀어 지금 프로그램이 있는 폴더에 덮어써 주세요.\n\n{url}\n\n"
+                f"[상세 사유]\n{detail[:900]}")
+        try:
+            self.root.after(0, _do)
+        except Exception:
+            pass
+
+    def on_copy_update_url_click(self):
+        url = self._update_url or config.MANUAL_DOWNLOAD_URL
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(url)
+            self._log(f"[자동 업데이트] 다운로드 주소를 복사했습니다: {url}")
+            messagebox.showinfo("자동 업데이트",
+                                f"다운로드 주소를 복사했습니다.\n브라우저 주소창에 붙여 넣어 "
+                                f"주세요.\n\n{url}")
+        except Exception as e:
+            messagebox.showerror("자동 업데이트", f"복사하지 못했습니다: {e}\n\n{url}")
 
     def _on_engine_change(self):
         """아이디/비번 입력칸은 빠른 방식(api)일 때만 보인다."""
@@ -1050,8 +1177,48 @@ def _run_guidemo(root, app):
                  f"별명은 남긴다(고객이 화면에서 직접 고칠 수 있다)")
         account_binding.unbind("__demo__")
         app._log(f"[v1.6.0 확인] 자동 업데이트 대상 경로(sys.executable): {updater.target_exe_path()}")
+
+        # ---- v1.7.0: '사유 미기록' 이 사라졌다는 것을 실제 코드로 보여 준다 ----
+        # 고객의 진짜 마커를 건드리지 않도록 임시 폴더로 갈아 끼우고, 데모 진단이 서버로
+        # 올라가지 않게 리포터도 잠시 끈다.
+        import tempfile as _tf
+        demo_dir = _tf.mkdtemp(prefix="upd_demo_")
+        keep = (updater._STATE_PATH, updater._TRAIL_PATH, updater.remote_log)
+        try:
+            updater._STATE_PATH = os.path.join(demo_dir, "update_state.json")
+            updater._TRAIL_PATH = os.path.join(demo_dir, "update_trail.log")
+            updater.remote_log = lambda *_a, **_k: None
+
+            # 고객 실측(1.5.0->1.6.0)과 똑같은 마커 상태: target + fail_count 만 있고 사유가 없다.
+            updater._save_state({"target": "9.9.9", "fail_count": 1,
+                                 "last_attempt": time.time()})
+            reason = updater.failure_reason("9.9.9")
+            app._log(f"[v1.7.0 확인] 사유가 마커에 없을 때(v1.6.0 이 '사유 미기록' 을 찍던 "
+                     f"바로 그 상태) 실측으로 만든 사유: {reason[:300]}")
+
+            # 다운로드 도중 프로그램이 닫힌 상황 = 실패가 아니라 '중단'. 백오프가 걸리면 안 된다.
+            updater._save_state({})
+            updater._set_phase("9.9.9", "download")
+            info = updater._reconcile_interrupted_attempt()
+            app._log(f"[v1.7.0 확인] 다운로드 중 프로그램 종료 -> 하드실패={info['hard']} "
+                     f"(백오프 없음, 즉시 재시도={updater._should_attempt('9.9.9')}) "
+                     f"사유='{updater._load_state()['last_error'][:120]}'")
+            app._log(f"[v1.7.0 확인] 백오프 상한: "
+                     f"{[updater._backoff_for(n) // 60 for n in range(1, 6)]}분 "
+                     f"(하드 실패 {updater.MAX_HARD_FAILURES}회면 자동 교체 포기하고 "
+                     f"매 실행 화면에 알림)")
+        finally:
+            updater._STATE_PATH, updater._TRAIL_PATH, updater.remote_log = keep
+            import shutil as _sh
+            _sh.rmtree(demo_dir, ignore_errors=True)
+
+        # 막힌 상태의 배너를 실제로 띄워 스크린샷에 남긴다(고객이 보게 될 바로 그 화면).
+        app._on_update_blocked(
+            "9.9.9",
+            "데모: 자동 교체가 막혔을 때 고객이 보는 화면 (실제 사유가 여기에 그대로 뜬다)",
+            config.MANUAL_DOWNLOAD_URL)
     except Exception as e:
-        app._log(f"[v1.6.0 확인] 실행 중 오류: {e}")
+        app._log(f"[v1.7.0 확인] 실행 중 오류: {e}")
 
     hold_ms = int(os.environ.get("DIAG_HOLD_MS", "6000"))
     root.lift()
