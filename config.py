@@ -9,7 +9,7 @@ import hashlib
 import os
 
 APP_NAME = "insta-dm-macro"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 CUSTOMER_ID = "1898680"
 
 INSTAGRAM_BASE = "https://www.instagram.com"
@@ -82,8 +82,12 @@ STATIC_BASE = f"https://works.insu.ng/works/public/{CUSTOMER_ID}"
 VERSION_URL = f"{STATIC_BASE}/version-{APP_NAME}.json"
 UPDATE_CHECK_SECONDS = 300
 # 자동 교체가 막힌 PC 에서 고객에게 보여줄 수동 다운로드 주소(zip 안에 실행파일 1개).
-# 버전 json 의 exeUrl 을 읽을 수 있으면 그걸 우선 안내하고, 못 읽을 때만 이 주소를 쓴다.
-MANUAL_DOWNLOAD_URL = f"{STATIC_BASE}/insta-dm-macro-fix4-150.zip"
+# 버전 json 의 zipUrl/exeUrl 을 읽을 수 있으면 그걸 우선 안내하고, 못 읽을 때만 이 주소를 쓴다.
+# **버전에서 자동으로 만든다.** v1.6.0 까지는 여기가 1.5.0 zip 에 박혀 있어서, 자동 교체가
+# 막힌 고객에게 '최신' 이라며 옛 버전 주소를 안내할 수 있었다(kmong 1898680, 260804).
+# CI 의 릴리스 단계도 같은 규칙(`APP_VERSION` 의 점을 없앤 접미사)으로 zip 을 만든다.
+MANUAL_DOWNLOAD_ZIP_NAME = f"insta-dm-macro-fix4-{APP_VERSION.replace('.', '')}.zip"
+MANUAL_DOWNLOAD_URL = f"{STATIC_BASE}/{MANUAL_DOWNLOAD_ZIP_NAME}"
 
 # 프로그램 전용 크롬(Chrome for Testing) / 계정별 프로필 / 설정·진행상황 저장 위치
 _HOME = os.path.expanduser("~")
